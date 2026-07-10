@@ -26,9 +26,61 @@ jobs:
       - run: uv run --frozen mypy src
       - run: uv run --frozen pyright
       - run: uv run --frozen pytest
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag ${RELEASE_TAG} must use the stable vX.Y.Z format."
+            exit 1
+          fi
+          PACKAGE_VERSION="$(uv version --short)"
+          test "${RELEASE_TAG#v}" = "${PACKAGE_VERSION}" || {
+            echo "Release tag ${RELEASE_TAG} does not match package version ${PACKAGE_VERSION}."
+            exit 1
+          }
       - run: uv run --frozen python -m build
+      - run: uv run --frozen twine check dist/*
+      - name: Verify wheel in a clean environment
+        run: |
+          uv venv build/release-smoke
+          uv pip install --python build/release-smoke/bin/python dist/*.whl
+          build/release-smoke/bin/python -c "import appwright; import appwright.async_api; import appwright.sync_api"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: appwright-${{ github.ref_name }}
+          name: distributions
           path: dist/*
           if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/appwright/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+
+  github-release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: distributions
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "${RELEASE_TAG}" dist/* --generate-notes --verify-tag
