@@ -1,0 +1,45 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Appwright.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private traces, or sensitive screenshots.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest runnable test or repository.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Appwright, Python, Appium, UiAutomator2, Android API, and application technology.
+      placeholder: Paste sanitized `appwright doctor --json` output where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Add relevant error text or attach safe-to-share artifacts.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed credentials and private application data.
+          required: true

@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose an Appwright API, behavior, or developer-experience improvement.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API or behavior
+      description: Include a short user-facing example when possible.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Platform and compatibility considerations
+      description: Note affected Android UI stacks, Appium drivers, clouds, or future iOS behavior.

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  locked:
+    name: Locked Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked --all-extras --dev
+      - run: uv run --frozen ruff format --check .
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen python scripts/check_no_private_state.py
+      - run: uv run --frozen python scripts/check_generated.py
+      - if: github.event_name == 'pull_request' && matrix.python-version == '3.11'
+        run: uv run --frozen python scripts/check_dco.py
+        env:
+          APPWRIGHT_DCO_BASE: ${{ github.event.pull_request.base.sha }}
+      - run: uv run --frozen mypy src
+      - run: uv run --frozen pyright
+      - run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run --frozen pytest -p pytest_cov -p asyncio --cov=appwright --cov-branch
+      - run: uv run --frozen python -m build
+
+  minimum:
+    name: Minimum supported dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.11"
+      - run: uv venv --python 3.11 .venv-minimum
+      - run: uv pip install --python .venv-minimum/bin/python --no-deps -e .
+      - run: >-
+          uv pip install --python .venv-minimum/bin/python
+          'Appium-Python-Client==5.1.1'
+          'greenlet==3.0.0'
+          'pydantic==2.12.0'
+          'selenium==4.26.0'
+          'hypothesis>=6.130,<7'
+          'pytest>=8.3,<10'
+          'pytest-asyncio>=0.26,<2'
+      - run: .venv-minimum/bin/pytest

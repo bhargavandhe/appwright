@@ -1,0 +1,7 @@
+Appwright
+Copyright 2026 Bhargav Andhe and Appwright contributors
+
+This product is inspired by Microsoft Playwright, licensed under the Apache License 2.0.
+Appwright is a behavioral clean-room implementation and does not include Playwright source code.
+
+Appium, Selenium, Android, and Playwright are trademarks of their respective owners.

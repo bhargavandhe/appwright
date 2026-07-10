@@ -1,0 +1,112 @@
+"""Typed public API generation specification."""
+
+from appwright.models.base import StrictModel
+
+
+class ApiClass(StrictModel):
+    name: str
+    methods: tuple[str, ...]
+
+
+class ApiSpecification(StrictModel):
+    classes: tuple[ApiClass, ...]
+
+
+LOCATOR_FACTORY_METHODS = (
+    "locator",
+    "get_by_text",
+    "get_by_label",
+    "get_by_placeholder",
+    "get_by_test_id",
+    "get_by_resource_id",
+    "get_by_content_description",
+    "get_by_role",
+)
+
+
+SPECIFICATION = ApiSpecification(
+    classes=(
+        ApiClass(name="Appwright", methods=("close",)),
+        ApiClass(name="Android", methods=("devices", "connect", "close")),
+        ApiClass(
+            name="Device",
+            methods=(
+                "launch_app",
+                "screenshot",
+                "hierarchy",
+                "server_logs",
+                "install_app",
+                "uninstall_app",
+                "close",
+            ),
+        ),
+        ApiClass(
+            name="App",
+            methods=(
+                *LOCATOR_FACTORY_METHODS,
+                "activate",
+                "terminate",
+                "clear_data",
+                "reset",
+                "screenshot",
+                "close",
+            ),
+        ),
+        ApiClass(name="Screen", methods=LOCATOR_FACTORY_METHODS),
+        ApiClass(
+            name="Locator",
+            methods=(
+                "nth",
+                "locator",
+                "and_",
+                "or_",
+                "filter",
+                "tap",
+                "double_tap",
+                "long_press",
+                "fill",
+                "clear",
+                "press",
+                "check",
+                "uncheck",
+                "swipe",
+                "scroll",
+                "drag_to",
+                "screenshot",
+                "wait_for",
+                "count",
+                "all",
+                "element_infos",
+                "is_visible",
+                "is_enabled",
+                "is_checked",
+                "text_content",
+                "accessible_name",
+                "bounds",
+                "element_info",
+            ),
+        ),
+        ApiClass(name="Keyboard", methods=("press",)),
+        ApiClass(name="Touchscreen", methods=("tap",)),
+        ApiClass(
+            name="LocatorAssertions",
+            methods=(
+                "to_be_visible",
+                "not_to_be_visible",
+                "to_be_hidden",
+                "to_be_enabled",
+                "to_be_disabled",
+                "to_be_editable",
+                "to_be_checked",
+                "to_be_unchecked",
+                "to_be_focused",
+                "to_be_selected",
+                "to_have_text",
+                "to_contain_text",
+                "to_have_accessible_name",
+                "to_have_resource_id",
+                "to_have_count",
+            ),
+        ),
+    )
+)

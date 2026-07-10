@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Appwright Discussions
+    url: https://github.com/bhargavandhe/appwright/discussions
+    about: Ask usage questions or discuss an idea before filing an issue.
+  - name: Security report
+    url: https://github.com/bhargavandhe/appwright/security/policy
+    about: Report suspected vulnerabilities privately. Do not open a public issue.

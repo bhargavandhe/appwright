@@ -1,0 +1,138 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "appwright"
+version = "0.1.0"
+description = "Playwright-style mobile automation powered by Appium"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Bhargav Andhe", email = "bhargavandhe2310@gmail.com" }]
+maintainers = [{ name = "Bhargav Andhe", email = "bhargavandhe2310@gmail.com" }]
+keywords = ["android", "appium", "automation", "mobile", "pytest", "testing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = [
+  "Appium-Python-Client>=5.1.1,<6",
+  "greenlet>=3,<4",
+  "pydantic>=2.12,<3",
+  "selenium>=4.26,<5",
+]
+
+[project.urls]
+Homepage = "https://github.com/bhargavandhe/appwright"
+Documentation = "https://github.com/bhargavandhe/appwright/tree/main/docs"
+Repository = "https://github.com/bhargavandhe/appwright.git"
+Issues = "https://github.com/bhargavandhe/appwright/issues"
+Changelog = "https://github.com/bhargavandhe/appwright/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+pytest = ["pytest>=8.3,<10"]
+
+[project.scripts]
+appwright = "appwright.cli.main:main"
+
+[project.entry-points.pytest11]
+appwright = "appwright.pytest_plugin.plugin"
+
+[dependency-groups]
+dev = [
+  "build>=1.2,<2",
+  "hatchling>=1.27,<2",
+  "hypothesis>=6.130,<7",
+  "mypy>=1.15,<2",
+  "pydantic>=2.12,<3",
+  "pyright>=1.1.400,<2",
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.26,<2",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/appwright"]
+
+[tool.hatch.build]
+exclude = [
+  "/.appwright-artifacts",
+  "/.coverage",
+  "/.hypothesis",
+  "/.mypy_cache",
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "/.venv",
+  "/build",
+  "/dist",
+  "/htmlcov",
+  "/playwright",
+  "/playwright-python",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers -ra"
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "integration: requires a local Appium server and Android device",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["appwright"]
+
+[tool.coverage.report]
+fail_under = 65
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "C4", "E", "F", "I", "PT", "RUF", "SIM", "UP"]
+ignore = ["ASYNC109", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+"**/__init__.py" = ["F401"]
+"src/appwright/api/generated/*.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["appwright"]
+
+[[tool.mypy.overrides]]
+module = ["greenlet"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.appwright]
+action_timeout_seconds = 30
+expect_timeout_seconds = 5
+stability_window_milliseconds = 200
