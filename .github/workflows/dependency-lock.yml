@@ -1,0 +1,54 @@
+name: Dependency lock refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Refresh uv lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - run: uv lock --upgrade
+      - name: Open or update dependency pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- uv.lock; then
+            echo "The uv lockfile is current."
+            exit 0
+          fi
+
+          branch="automation/uv-lock-refresh"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add uv.lock
+          git commit -m "Refresh locked dependencies"
+          git push --force-with-lease origin "$branch"
+
+          if gh pr view "$branch" >/dev/null 2>&1; then
+            gh pr edit "$branch" --add-label dependencies
+          else
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "Refresh locked dependencies" \
+              --body "Automated weekly refresh of the checked-in uv lockfile." \
+              --label dependencies
+          fi
+
+          gh workflow run ci.yml --ref "$branch"
+          gh workflow run security.yml --ref "$branch"
