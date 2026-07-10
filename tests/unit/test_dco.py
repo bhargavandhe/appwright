@@ -29,3 +29,13 @@ def test_missing_or_different_signoff_is_rejected() -> None:
         ),
     )
     assert unsigned_commits(records) == records
+
+
+def test_github_bot_commit_is_exempt() -> None:
+    record = CommitRecord(
+        revision="abc123",
+        author_name="dependabot[bot]",
+        author_email="49699333+dependabot[bot]@users.noreply.github.com",
+        message="Automated dependency update",
+    )
+    assert unsigned_commits((record,)) == ()

@@ -41,6 +41,12 @@ def commit_records(log_output: str) -> tuple[CommitRecord, ...]:
 def unsigned_commits(records: tuple[CommitRecord, ...]) -> tuple[CommitRecord, ...]:
     unsigned: list[CommitRecord] = []
     for record in records:
+        automated_author = (
+            record.author_name.endswith("[bot]")
+            or "[bot]@users.noreply.github.com" in record.author_email
+        )
+        if automated_author:
+            continue
         signoffs = tuple(SIGN_OFF.findall(record.message))
         author_signed = any(
             name.strip() == record.author_name
