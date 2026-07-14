@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import TypeVar
@@ -15,6 +15,7 @@ from appwright.backends.base import (
     AutomationBackend,
     BackendError,
     BackendFailureKind,
+    IndeterminateActionBackendError,
     RecoverableBackendError,
 )
 from appwright.core.devices import discover_android_devices
@@ -22,6 +23,7 @@ from appwright.core.errors import (
     AppiumUnavailableError,
     AppwrightError,
     DeviceNotFoundError,
+    IndeterminateActionError,
     InvalidSelectorError,
     ProtocolError,
     SessionTaintedError,
@@ -43,7 +45,6 @@ from appwright.models.config import (
 from appwright.models.data import (
     ActionRequest,
     CallLogEntry,
-    Deadline,
     DeviceInfo,
     ElementSnapshot,
     ErrorDetails,
@@ -74,6 +75,14 @@ from appwright.models.enums import (
     TraceEventKind,
     WaitState,
 )
+from appwright.operations import (
+    ActionReceipt,
+    DispatchState,
+    OperationDeadline,
+    OperationStage,
+    actionability_problem,
+    replay_safety_for,
+)
 from appwright.selectors.compiler import LocatorPlan, SelectorCompilationError, compile_selector
 from appwright.selectors.models import Selector, TextMatcher
 from appwright.tracing import TraceRecorder
@@ -93,6 +102,7 @@ def error_details(
     api_name: str,
     message: str,
     plan: LocatorPlan | None = None,
+    locator: str | None = None,
     elapsed: timedelta | None = None,
     call_log: tuple[CallLogEntry, ...] = (),
     expected: str | None = None,
@@ -103,7 +113,7 @@ def error_details(
         code=code,
         api_name=api_name,
         message=message,
-        locator=None if plan is None else plan.description,
+        locator=plan.description if plan is not None else locator,
         strategy=None if plan is None else plan.strategy,
         elapsed=elapsed,
         call_log=call_log,
@@ -188,28 +198,21 @@ def diagnostic_query_result(result: QueryResult) -> QueryResult:
     return QueryResult(elements=tuple(diagnostic_snapshot(element) for element in result.elements))
 
 
-def actionability_problem(element: ElementSnapshot, kind: ActionKind) -> str | None:
-    if not element.displayed:
-        return "element is not visible"
-    if element.bounds.width == 0 or element.bounds.height == 0:
-        return "element has no visible area"
-    enabled_actions = {
-        ActionKind.TAP,
-        ActionKind.DOUBLE_TAP,
-        ActionKind.LONG_PRESS,
-        ActionKind.FILL,
-        ActionKind.CLEAR,
-        ActionKind.PRESS,
-        ActionKind.CHECK,
-        ActionKind.UNCHECK,
-    }
-    if kind in enabled_actions and not element.enabled:
-        return "element is not enabled"
-    if kind in {ActionKind.FILL, ActionKind.CLEAR, ActionKind.PRESS} and not element.editable:
-        return "element is not editable"
-    if kind in {ActionKind.CHECK, ActionKind.UNCHECK} and not element.checkable:
-        return "element is not checkable"
-    return None
+def device_action_snapshot(identity: str) -> ElementSnapshot:
+    """Build a non-element target record for device-level action receipts."""
+
+    return ElementSnapshot(
+        identity=identity,
+        displayed=False,
+        enabled=True,
+        selected=False,
+        checked=False,
+        checkable=False,
+        focusable=False,
+        focused=False,
+        editable=False,
+        bounds=Rect(x=0, y=0, width=0, height=0),
+    )
 
 
 def trace_event(kind: TraceEventKind, name: str, fields: tuple[tuple[str, str], ...]) -> TraceEvent:
@@ -379,7 +382,7 @@ class AsyncLocator:
     async def query_once(self, timeout: timedelta) -> QueryResult:
         plan = self.plan()
         started = monotonic()
-        result = await self.device.backend.query(plan, timeout)
+        result = await self.device.backend.resolve(plan, timeout)
         self.device.tracing.record(
             trace_event(
                 TraceEventKind.QUERY,
@@ -400,10 +403,33 @@ class AsyncLocator:
     async def query(self, timeout: timedelta | None = None) -> QueryResult:
         plan = self.plan()
         selected_timeout = timeout if timeout is not None else self.device.timeouts.transport
-        try:
-            return await self.query_once(selected_timeout)
-        except BackendError as error:
-            raise self.translate_backend_error(error, "locator.query", plan) from error
+        deadline = OperationDeadline.start(selected_timeout)
+        delay = self.device.timeouts.retry.initial_delay
+        call_log: list[CallLogEntry] = []
+        while True:
+            try:
+                return await self.query_once(deadline.remaining())
+            except RecoverableBackendError as error:
+                call_log.append(
+                    CallLogEntry(
+                        message=error.failure.message,
+                        elapsed=deadline.elapsed(),
+                    )
+                )
+                if deadline.expired():
+                    details = error_details(
+                        code=ErrorCode.TIMEOUT,
+                        api_name="locator.query",
+                        message=f"timeout querying {plan.description}",
+                        plan=plan,
+                        elapsed=deadline.elapsed(),
+                        call_log=tuple(call_log),
+                    )
+                    raise AppwrightTimeoutError(self.device.record_error(details)) from error
+                await self.wait_before_retry(delay, deadline)
+                delay = self.next_delay(delay)
+            except BackendError as error:
+                raise self.translate_backend_error(error, "locator.query", plan) from error
 
     def translate_backend_error(
         self,
@@ -427,33 +453,56 @@ class AsyncLocator:
         count = await self.count()
         return tuple(self.nth(index) for index in range(count))
 
+    async def probe_all(
+        self,
+        timeout: timedelta | None = None,
+    ) -> tuple[ElementSnapshot, ...]:
+        """Return every current match after retrying transient backend failures."""
+
+        selected_timeout = timeout if timeout is not None else self.device.timeouts.probe
+        return (await self.query(selected_timeout)).elements
+
+    async def probe(self, timeout: timedelta | None = None) -> ElementSnapshot | None:
+        """Return the current strict match without waiting for application state."""
+
+        elements = await self.probe_all(timeout)
+        if not elements:
+            return None
+        if len(elements) > 1:
+            return self.strict_element(
+                QueryResult(elements=elements),
+                "locator.probe",
+                self.plan(),
+            )
+        return next(iter(elements))
+
     async def element_infos(self) -> tuple[ElementSnapshot, ...]:
-        return (await self.query()).elements
+        return await self.probe_all()
 
     async def count(self) -> int:
-        return len((await self.query()).elements)
+        return len(await self.probe_all())
 
     async def element_info(self) -> ElementSnapshot:
-        result = await self.query()
-        return self.strict_element(result, "locator.element_info", self.plan())
+        element = await self.probe()
+        if element is not None:
+            return element
+        return self.strict_element(
+            QueryResult(elements=()),
+            "locator.element_info",
+            self.plan(),
+        )
 
     async def is_visible(self) -> bool:
-        elements = (await self.query()).elements
-        if len(elements) > 1:
-            self.strict_element(QueryResult(elements=elements), "locator.is_visible", self.plan())
-        return bool(elements) and elements[0].displayed
+        element = await self.probe()
+        return element is not None and element.displayed
 
     async def is_enabled(self) -> bool:
-        elements = (await self.query()).elements
-        if len(elements) > 1:
-            self.strict_element(QueryResult(elements=elements), "locator.is_enabled", self.plan())
-        return bool(elements) and elements[0].enabled
+        element = await self.probe()
+        return element is not None and element.enabled
 
     async def is_checked(self) -> bool:
-        elements = (await self.query()).elements
-        if len(elements) > 1:
-            self.strict_element(QueryResult(elements=elements), "locator.is_checked", self.plan())
-        return bool(elements) and elements[0].checked
+        element = await self.probe()
+        return element is not None and element.checked
 
     async def text_content(self) -> str:
         return (await self.element_info()).text
@@ -469,6 +518,9 @@ class AsyncLocator:
         result: QueryResult,
         api_name: str,
         plan: LocatorPlan,
+        *,
+        elapsed: timedelta | None = None,
+        call_log: tuple[CallLogEntry, ...] = (),
     ) -> ElementSnapshot:
         count = len(result.elements)
         if count != 1:
@@ -477,6 +529,8 @@ class AsyncLocator:
                 api_name=api_name,
                 message=f"locator resolved to {count} elements",
                 plan=plan,
+                elapsed=elapsed,
+                call_log=call_log,
                 received=str(count),
                 expected="1",
             )
@@ -489,14 +543,33 @@ class AsyncLocator:
         request: ActionRequest,
         *,
         timeout: timedelta | None = None,
-    ) -> None:
+        auto_scroll: bool = False,
+    ) -> ActionReceipt:
         plan = self.plan()
         selected_timeout = timeout if timeout is not None else self.device.timeouts.action
-        deadline = Deadline.start(selected_timeout)
+        deadline = OperationDeadline.start(selected_timeout)
         delay = self.device.timeouts.retry.initial_delay
         call_log: list[CallLogEntry] = []
+        last_result: QueryResult | None = None
+        auto_scroll_attempted = False
         while True:
             if deadline.expired():
+                if last_result is not None and len(last_result.elements) > 1:
+                    count = len(last_result.elements)
+                    details = error_details(
+                        code=ErrorCode.STRICT_MODE,
+                        api_name=f"locator.{request.kind.value}",
+                        message=(
+                            f"timeout waiting for {plan.description} to resolve uniquely; "
+                            f"received {count} elements"
+                        ),
+                        plan=plan,
+                        elapsed=deadline.elapsed(),
+                        call_log=tuple(call_log),
+                        expected="1",
+                        received=str(count),
+                    )
+                    raise StrictModeViolationError(self.device.record_error(details))
                 message = f"timeout waiting to {request.kind.value} {plan.description}"
                 details = error_details(
                     code=ErrorCode.TIMEOUT,
@@ -510,7 +583,8 @@ class AsyncLocator:
                 raise AppwrightTimeoutError(selected_details)
             remaining = deadline.remaining()
             try:
-                result = await self.device.backend.query(plan, remaining)
+                result = await self.device.backend.resolve(plan, remaining)
+                last_result = result
             except RecoverableBackendError as error:
                 call_log.append(
                     CallLogEntry(
@@ -534,24 +608,16 @@ class AsyncLocator:
                         elapsed=deadline.elapsed(),
                     )
                 )
-                if request.kind not in {ActionKind.SCROLL, ActionKind.SWIPE}:
-                    try:
-                        await self.device.backend.scroll_into_view(plan, deadline.remaining())
-                    except RecoverableBackendError as error:
-                        call_log.append(
-                            CallLogEntry(
-                                message=error.failure.message,
-                                elapsed=deadline.elapsed(),
-                            )
-                        )
-                    except BackendError as error:
-                        raise self.translate_backend_error(
-                            error,
-                            f"locator.{request.kind.value}",
-                            plan,
-                        ) from error
+                if auto_scroll and not auto_scroll_attempted:
+                    auto_scroll_attempted = True
+                    await self.scroll_into_view(timeout=deadline.remaining())
             elif len(result.elements) > 1:
-                self.strict_element(result, f"locator.{request.kind.value}", plan)
+                call_log.append(
+                    CallLogEntry(
+                        message=f"locator resolved to {len(result.elements)} elements",
+                        elapsed=deadline.elapsed(),
+                    )
+                )
             else:
                 element = result.elements[0]
                 problem = None if request.force else actionability_problem(element, request.kind)
@@ -562,51 +628,36 @@ class AsyncLocator:
                             elapsed=deadline.elapsed(),
                         )
                     )
-                    if not element.displayed and request.kind not in {
-                        ActionKind.SCROLL,
-                        ActionKind.SWIPE,
-                    }:
-                        try:
-                            await self.device.backend.scroll_into_view(plan, deadline.remaining())
-                        except RecoverableBackendError as error:
-                            call_log.append(
-                                CallLogEntry(
-                                    message=error.failure.message,
-                                    elapsed=deadline.elapsed(),
-                                )
-                            )
-                        except BackendError as error:
-                            raise self.translate_backend_error(
-                                error,
-                                f"locator.{request.kind.value}",
-                                plan,
-                            ) from error
+                    if (
+                        auto_scroll
+                        and not auto_scroll_attempted
+                        and problem in {"element is not visible", "element has no visible area"}
+                    ):
+                        auto_scroll_attempted = True
+                        await self.scroll_into_view(timeout=deadline.remaining())
                 else:
-                    stable = request.force or await self.check_stability(element, plan, deadline)
+                    try:
+                        stable = request.force or await self.check_stability(
+                            element,
+                            plan,
+                            deadline,
+                        )
+                    except BackendError as error:
+                        raise self.translate_backend_error(
+                            error,
+                            f"locator.{request.kind.value}",
+                            plan,
+                        ) from error
                     if stable:
                         try:
                             if deadline.expired():
                                 continue
-                            action_result = await self.device.backend.perform(
-                                plan, request, deadline.remaining()
+                            receipt = await self.device.backend.dispatch(
+                                plan,
+                                request,
+                                element,
+                                deadline.remaining(),
                             )
-                            if (
-                                request.kind is ActionKind.CHECK
-                                and not action_result.element.checked
-                            ) or (
-                                request.kind is ActionKind.UNCHECK and action_result.element.checked
-                            ):
-                                call_log.append(
-                                    CallLogEntry(
-                                        message=(
-                                            "element did not reach the requested checked state"
-                                        ),
-                                        elapsed=deadline.elapsed(),
-                                    )
-                                )
-                                await self.wait_before_retry(delay, deadline)
-                                delay = self.next_delay(delay)
-                                continue
                             self.device.tracing.record(
                                 trace_event(
                                     TraceEventKind.ACTION,
@@ -615,11 +666,11 @@ class AsyncLocator:
                                         ("locator", plan.description),
                                         ("strategy", plan.strategy.value),
                                         (
-                                            "result",
-                                            action_result.model_copy(
+                                            "receipt",
+                                            receipt.model_copy(
                                                 update={
-                                                    "element": diagnostic_snapshot(
-                                                        action_result.element
+                                                    "pre_action": diagnostic_snapshot(
+                                                        receipt.pre_action
                                                     )
                                                 }
                                             ).model_dump_json(),
@@ -628,7 +679,44 @@ class AsyncLocator:
                                     ),
                                 )
                             )
-                            return
+                            return receipt
+                        except IndeterminateActionBackendError as error:
+                            receipt = error.receipt
+                            may_retry_unknown = (
+                                request.kind in {ActionKind.CHECK, ActionKind.UNCHECK}
+                                and receipt.action is request.kind
+                                and receipt.dispatch_state is DispatchState.UNKNOWN
+                            )
+                            if may_retry_unknown:
+                                call_log.append(
+                                    CallLogEntry(
+                                        message=(
+                                            f"{request.kind.value} dispatch outcome was unknown; "
+                                            "re-observing idempotent state"
+                                        ),
+                                        elapsed=deadline.elapsed(),
+                                    )
+                                )
+                            else:
+                                details = error_details(
+                                    code=ErrorCode.INDETERMINATE_ACTION,
+                                    api_name=f"locator.{request.kind.value}",
+                                    message=(
+                                        f"{request.kind.value} dispatch outcome is unknown; "
+                                        "the action was not replayed"
+                                    ),
+                                    plan=plan,
+                                    elapsed=deadline.elapsed(),
+                                    call_log=tuple(call_log),
+                                    appium_command=error.failure.appium_command,
+                                )
+                                safe_receipt = receipt.model_copy(
+                                    update={"pre_action": diagnostic_snapshot(receipt.pre_action)}
+                                )
+                                raise IndeterminateActionError(
+                                    self.device.record_error(details),
+                                    safe_receipt,
+                                ) from error
                         except RecoverableBackendError as error:
                             call_log.append(
                                 CallLogEntry(
@@ -637,10 +725,7 @@ class AsyncLocator:
                                 )
                             )
                         except BackendError as error:
-                            if (
-                                error.failure.kind is BackendFailureKind.MATCH_COUNT
-                                and error.failure.match_count == 0
-                            ):
+                            if error.failure.kind is BackendFailureKind.MATCH_COUNT:
                                 call_log.append(
                                     CallLogEntry(
                                         message=error.failure.message,
@@ -667,7 +752,7 @@ class AsyncLocator:
         self,
         first: ElementSnapshot,
         plan: LocatorPlan,
-        deadline: Deadline,
+        deadline: OperationDeadline,
     ) -> bool:
         remaining = deadline.remaining().total_seconds()
         stability_seconds = self.device.timeouts.stability.total_seconds()
@@ -675,12 +760,16 @@ class AsyncLocator:
             return False
         await asyncio.sleep(stability_seconds)
         try:
-            result = await self.device.backend.query(plan, deadline.remaining())
+            result = await self.device.backend.resolve(plan, deadline.remaining())
         except RecoverableBackendError:
             return False
         return len(result.elements) == 1 and stable_snapshots(first, result.elements[0])
 
-    async def wait_before_retry(self, delay: timedelta, deadline: Deadline) -> None:
+    async def wait_before_retry(
+        self,
+        delay: timedelta,
+        deadline: OperationDeadline,
+    ) -> None:
         seconds = min(delay.total_seconds(), deadline.remaining().total_seconds())
         if seconds > 0:
             await asyncio.sleep(seconds)
@@ -698,11 +787,13 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
             ActionRequest(kind=ActionKind.TAP, force=force, trial=trial),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def double_tap(
@@ -710,11 +801,13 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
             ActionRequest(kind=ActionKind.DOUBLE_TAP, force=force, trial=trial),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def long_press(
@@ -722,11 +815,13 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
             ActionRequest(kind=ActionKind.LONG_PRESS, force=force, trial=trial),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def fill(
@@ -735,6 +830,7 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
@@ -745,6 +841,7 @@ class AsyncLocator:
                 trial=trial,
             ),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def clear(
@@ -752,11 +849,13 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
             ActionRequest(kind=ActionKind.CLEAR, force=force, trial=trial),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def press(
@@ -765,6 +864,7 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
@@ -775,6 +875,7 @@ class AsyncLocator:
                 trial=trial,
             ),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def check(
@@ -782,11 +883,13 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
             ActionRequest(kind=ActionKind.CHECK, force=force, trial=trial),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def uncheck(
@@ -794,11 +897,13 @@ class AsyncLocator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
         await self.perform(
             ActionRequest(kind=ActionKind.UNCHECK, force=force, trial=trial),
             timeout=timeout,
+            auto_scroll=auto_scroll,
         )
 
     async def swipe(
@@ -841,6 +946,30 @@ class AsyncLocator:
             timeout=timeout,
         )
 
+    async def scroll_into_view(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> OperationResult:
+        """Explicitly ask the backend to bring this locator into the viewport."""
+
+        selected_timeout = timeout if timeout is not None else self.device.timeouts.action
+        deadline = OperationDeadline.start(selected_timeout)
+        plan = self.plan()
+        result, receipt = await self.device.dispatch_device_action(
+            lambda: self.device.backend.scroll_into_view(
+                plan,
+                deadline.remaining(),
+            ),
+            action=ActionKind.SCROLL,
+            api_name="locator.scroll_into_view",
+            locator=plan.description,
+            pre_action=device_action_snapshot("locator-scroll"),
+            deadline=deadline,
+        )
+        del receipt
+        return result
+
     async def drag_to(
         self,
         target: AsyncLocator,
@@ -851,8 +980,8 @@ class AsyncLocator:
     ) -> None:
         self.validate_same_device(target)
         selected_timeout = timeout if timeout is not None else self.device.timeouts.action
-        deadline = Deadline.start(selected_timeout)
-        await self.perform(
+        deadline = OperationDeadline.start(selected_timeout)
+        source_receipt = await self.perform(
             ActionRequest(kind=ActionKind.DRAG_TO, force=force, trial=True),
             timeout=deadline.remaining(),
         )
@@ -862,10 +991,18 @@ class AsyncLocator:
         )
         if trial:
             return
-        try:
-            await self.device.backend.drag(self.plan(), target.plan(), deadline.remaining())
-        except BackendError as error:
-            raise self.translate_backend_error(error, "locator.drag_to", self.plan()) from error
+        await self.device.dispatch_device_action(
+            lambda: self.device.backend.drag(
+                self.plan(),
+                target.plan(),
+                deadline.remaining(),
+            ),
+            action=ActionKind.DRAG_TO,
+            api_name="locator.drag_to",
+            locator=self.plan().description,
+            pre_action=source_receipt.pre_action,
+            deadline=deadline,
+        )
 
     async def screenshot(
         self,
@@ -874,7 +1011,7 @@ class AsyncLocator:
         timeout: timedelta | None = None,
     ) -> Screenshot:
         selected_timeout = timeout if timeout is not None else self.device.timeouts.action
-        deadline = Deadline.start(selected_timeout)
+        deadline = OperationDeadline.start(selected_timeout)
         await self.perform(
             ActionRequest(kind=ActionKind.SCREENSHOT, trial=True),
             timeout=deadline.remaining(),
@@ -896,46 +1033,86 @@ class AsyncLocator:
         *,
         timeout: timedelta | None = None,
     ) -> None:
-        selected_timeout = timeout if timeout is not None else self.device.timeouts.action
-        deadline = Deadline.start(selected_timeout)
+        selected_timeout = timeout if timeout is not None else self.device.timeouts.wait
+        deadline = OperationDeadline.start(selected_timeout)
         delay = self.device.timeouts.retry.initial_delay
+        call_log: list[CallLogEntry] = []
+        last_result: QueryResult | None = None
         while True:
             if deadline.expired():
                 plan = self.plan()
+                if last_result is not None and len(last_result.elements) > 1:
+                    self.strict_element(
+                        last_result,
+                        "locator.wait_for",
+                        plan,
+                        elapsed=deadline.elapsed(),
+                        call_log=tuple(call_log),
+                    )
                 details = error_details(
                     code=ErrorCode.TIMEOUT,
                     api_name="locator.wait_for",
                     message=f"timeout waiting for locator to be {state.value}",
                     plan=plan,
+                    elapsed=deadline.elapsed(),
+                    call_log=tuple(call_log),
                     expected=state.value,
                 )
                 selected_details = self.device.record_error(details)
                 raise AppwrightTimeoutError(selected_details)
             try:
-                elements = (await self.query_once(deadline.remaining())).elements
-            except RecoverableBackendError:
+                result = await self.query_once(deadline.remaining())
+                last_result = result
+                elements = result.elements
+                observation_valid = True
+            except RecoverableBackendError as error:
                 elements = ()
+                observation_valid = False
+                call_log.append(
+                    CallLogEntry(
+                        message=error.failure.message,
+                        elapsed=deadline.elapsed(),
+                    )
+                )
             except BackendError as error:
                 raise self.translate_backend_error(
                     error, "locator.wait_for", self.plan()
                 ) from error
-            attached = bool(elements)
-            visible = any(element.displayed for element in elements)
-            satisfied = (
+            unique = observation_valid and len(elements) == 1
+            attached = unique
+            visible = unique and next(iter(elements)).displayed
+            satisfied = observation_valid and (
                 (state is WaitState.ATTACHED and attached)
-                or (state is WaitState.DETACHED and not attached)
+                or (state is WaitState.DETACHED and not elements)
                 or (state is WaitState.VISIBLE and visible)
-                or (state is WaitState.HIDDEN and not visible)
+                or (state is WaitState.HIDDEN and (not elements or (unique and not visible)))
             )
             if satisfied:
                 return
+            if len(elements) > 1:
+                call_log.append(
+                    CallLogEntry(
+                        message=f"locator resolved to {len(elements)} elements",
+                        elapsed=deadline.elapsed(),
+                    )
+                )
             if deadline.expired():
                 plan = self.plan()
+                if len(elements) > 1:
+                    self.strict_element(
+                        QueryResult(elements=elements),
+                        "locator.wait_for",
+                        plan,
+                        elapsed=deadline.elapsed(),
+                        call_log=tuple(call_log),
+                    )
                 details = error_details(
                     code=ErrorCode.TIMEOUT,
                     api_name="locator.wait_for",
                     message=f"timeout waiting for locator to be {state.value}",
                     plan=plan,
+                    elapsed=deadline.elapsed(),
+                    call_log=tuple(call_log),
                     expected=state.value,
                 )
                 selected_details = self.device.record_error(details)
@@ -950,9 +1127,14 @@ class AsyncKeyboard:
 
     async def press(self, key: Key, *, timeout: timedelta | None = None) -> None:
         selected_timeout = timeout if timeout is not None else self.device.timeouts.action
-        await self.device.call_backend(
-            lambda: self.device.backend.press_key(key, selected_timeout),
-            "keyboard.press",
+        deadline = OperationDeadline.start(selected_timeout)
+        await self.device.dispatch_device_action(
+            lambda: self.device.backend.press_key(key, deadline.remaining()),
+            action=ActionKind.PRESS,
+            api_name="keyboard.press",
+            locator=f"key={key.value!r}",
+            pre_action=device_action_snapshot("device-keyboard"),
+            deadline=deadline,
         )
 
 
@@ -962,9 +1144,14 @@ class AsyncTouchscreen:
 
     async def tap(self, point: Point, *, timeout: timedelta | None = None) -> None:
         selected_timeout = timeout if timeout is not None else self.device.timeouts.action
-        await self.device.call_backend(
-            lambda: self.device.backend.tap_point(point, selected_timeout),
-            "touchscreen.tap",
+        deadline = OperationDeadline.start(selected_timeout)
+        await self.device.dispatch_device_action(
+            lambda: self.device.backend.tap_point(point, deadline.remaining()),
+            action=ActionKind.TAP,
+            api_name="touchscreen.tap",
+            locator=f"point=({point.x},{point.y})",
+            pre_action=device_action_snapshot("device-touchscreen"),
+            deadline=deadline,
         )
 
 
@@ -1120,6 +1307,75 @@ class AsyncDevice:
         )
         return selected_details
 
+    async def dispatch_device_action(
+        self,
+        operation: Callable[[], Awaitable[BackendResult]],
+        *,
+        action: ActionKind,
+        api_name: str,
+        locator: str,
+        pre_action: ElementSnapshot,
+        deadline: OperationDeadline,
+    ) -> tuple[BackendResult, ActionReceipt]:
+        """Conservatively receipt a legacy non-element backend command."""
+
+        started_at = datetime.now(UTC)
+        pending = ActionReceipt(
+            action=action,
+            locator=locator,
+            replay_safety=replay_safety_for(action),
+            stage=OperationStage.DISPATCH,
+            dispatch_state=DispatchState.NOT_DISPATCHED,
+            started_at=started_at,
+            pre_action=pre_action,
+        )
+        try:
+            result = await operation()
+        except BackendError as error:
+            unknown = pending.model_copy(update={"dispatch_state": DispatchState.UNKNOWN})
+            safe_unknown = unknown.model_copy(
+                update={"pre_action": diagnostic_snapshot(unknown.pre_action)}
+            )
+            details = error_details(
+                code=ErrorCode.INDETERMINATE_ACTION,
+                api_name=api_name,
+                message=(
+                    f"{api_name} dispatch outcome is unknown; the action was not replayed: "
+                    f"{error.failure.message}"
+                ),
+                locator=locator,
+                elapsed=deadline.elapsed(),
+                appium_command=error.failure.appium_command,
+            )
+            raise IndeterminateActionError(
+                self.record_error(details),
+                safe_unknown,
+            ) from error
+
+        dispatched = pending.model_copy(
+            update={
+                "dispatch_state": DispatchState.DISPATCHED,
+                "dispatched_at": datetime.now(UTC),
+            }
+        )
+        self.tracing.record(
+            trace_event(
+                TraceEventKind.ACTION,
+                api_name,
+                (
+                    ("locator", locator),
+                    (
+                        "receipt",
+                        dispatched.model_copy(
+                            update={"pre_action": diagnostic_snapshot(dispatched.pre_action)}
+                        ).model_dump_json(),
+                    ),
+                    ("elapsed", str(deadline.elapsed().total_seconds())),
+                ),
+            )
+        )
+        return result, dispatched
+
     async def call_backend(
         self,
         operation: Callable[[], Awaitable[BackendResult]],
@@ -1231,7 +1487,7 @@ class AsyncDevice:
 
     async def hierarchy(self) -> HierarchySource:
         hierarchy = await self.call_backend(
-            lambda: self.backend.hierarchy(self.timeouts.action),
+            lambda: self.backend.observe(self.timeouts.action),
             "device.hierarchy",
         )
         self.attach_artifact(

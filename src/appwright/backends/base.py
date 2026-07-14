@@ -12,6 +12,7 @@ from appwright.models.config import AndroidSessionOptions, AppiumServer, Session
 from appwright.models.data import (
     ActionRequest,
     ActionResult,
+    ElementSnapshot,
     HierarchySource,
     InstallApplicationRequest,
     OperationResult,
@@ -22,6 +23,7 @@ from appwright.models.data import (
     UninstallApplicationRequest,
 )
 from appwright.models.enums import Key, MobileCommand
+from appwright.operations import ActionReceipt
 from appwright.selectors.compiler import LocatorPlan
 
 
@@ -51,6 +53,14 @@ class RecoverableBackendError(BackendError):
     pass
 
 
+class IndeterminateActionBackendError(BackendError):
+    """A backend action may have reached the device before transport failed."""
+
+    def __init__(self, failure: BackendFailure, receipt: ActionReceipt) -> None:
+        super().__init__(failure)
+        self.receipt = receipt
+
+
 class AutomationBackend(Protocol):
     server: AppiumServer
     server_logs: list[ServerLogRecord]
@@ -59,6 +69,18 @@ class AutomationBackend(Protocol):
     async def start(self, timeout: timedelta) -> None: ...
 
     async def create_session(self, options: AndroidSessionOptions) -> None: ...
+
+    async def observe(self, timeout: timedelta) -> HierarchySource: ...
+
+    async def resolve(self, plan: LocatorPlan, timeout: timedelta) -> QueryResult: ...
+
+    async def dispatch(
+        self,
+        plan: LocatorPlan,
+        request: ActionRequest,
+        pre_action: ElementSnapshot,
+        timeout: timedelta,
+    ) -> ActionReceipt: ...
 
     async def query(self, plan: LocatorPlan, timeout: timedelta) -> QueryResult: ...
 

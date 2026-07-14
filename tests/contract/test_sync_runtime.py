@@ -19,4 +19,4 @@ def test_sync_api_drives_async_core() -> None:
         locator = app.get_by_label("Email")
         locator.fill("user@example.com")
         expect(locator).to_be_visible()
-    assert FakeCallKind.PERFORM in factory.backends[0].calls
+    assert FakeCallKind.DISPATCH in factory.backends[0].calls

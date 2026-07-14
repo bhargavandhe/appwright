@@ -7,6 +7,8 @@ Appium owns device transport and platform automation.
 Generated sync API ─┐
                     ├── Canonical async runtime
 Generated async API ┘            │
+                    Mobile lifecycle / screen kernel
+                                  │
                          Backend-neutral protocol
                                   │
                             Appium adapter
@@ -25,6 +27,7 @@ Appwright owns:
 - lazy strict locator resolution;
 - actionability, retries, and assertion polling;
 - deadline and cancellation semantics;
+- atomic hierarchy observations, typed screens, transitions, and interruptions;
 - error rewriting, tracing, and pytest artifacts; and
 - managed local server lifecycle.
 
@@ -50,6 +53,25 @@ The official Appium Python client is blocking. Every Appium session therefore ow
 
 Different sessions can progress independently.
 
+## Mobile lifecycle kernel
+
+The typed-screen layer follows three rules:
+
+1. one root deadline owns an operation and every nested action, observation, interruption, and
+   recovery step;
+2. one immutable hierarchy observation is evaluated locally against every competing screen in a
+   poll; and
+3. action dispatch and destination waiting are separate phases joined by an `ActionReceipt`.
+
+Screen readiness does not issue one Appium request per locator. The observation engine captures
+the whole device once, assigns a monotonic sequence, and evaluates app-scoped and device-scoped
+conditions from that same state. A final live resolution is still required immediately before an
+element action.
+
+Typed lifecycle operations are serialized per device session. Explicit structural work, such as
+an interruption dismissal during a transition, may re-enter through a scoped lifecycle lease;
+unrelated child tasks and separate app wrappers cannot bypass serialization.
+
 ## Cancellation and uncertain commands
 
 Cancelling an asyncio task stops waiting for a blocking Appium request but cannot interrupt the
@@ -65,6 +87,8 @@ Appwright responds conservatively:
 5. record the uncertain command and teardown result.
 
 Deterministic retirement is safer than silently reusing a session with unknown state.
+The same principle applies above transport: a non-replayable action with an unknown dispatch
+state is surfaced with its receipt and is never automatically repeated.
 
 ## Typed boundaries
 

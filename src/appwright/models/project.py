@@ -12,7 +12,7 @@ from typing import TypeVar, cast
 from pydantic import AnyHttpUrl, Field, field_validator
 
 from appwright.models.base import StrictModel
-from appwright.models.config import AppiumServer, AppiumTimeouts
+from appwright.models.config import AppiumServer, Timeouts
 from appwright.models.enums import ScreenshotMode, TraceMode
 
 Value = TypeVar("Value")
@@ -23,7 +23,14 @@ class AppwrightConfigSource(StrictModel):
     server_url: AnyHttpUrl | None = None
     app_package: str | None = None
     clear_data: bool | None = None
+    probe_timeout_seconds: float | None = Field(default=None, gt=0)
+    wait_timeout_seconds: float | None = Field(default=None, gt=0)
     action_timeout_seconds: float | None = Field(default=None, gt=0)
+    transition_timeout_seconds: float | None = Field(default=None, gt=0)
+    interruption_timeout_seconds: float | None = Field(default=None, gt=0)
+    transport_timeout_seconds: float | None = Field(default=None, gt=0)
+    # Compatibility fallback for configurations written before wait became the
+    # canonical name. `wait_timeout_seconds` wins when both are supplied.
     expect_timeout_seconds: float | None = Field(default=None, gt=0)
     stability_window_milliseconds: float | None = Field(default=None, gt=0)
     trace_mode: TraceMode | None = None
@@ -51,7 +58,7 @@ class AppwrightConfiguration(StrictModel):
     server: AppiumServer = AppiumServer.local()
     app_package: str | None = None
     clear_data: bool = False
-    timeouts: AppiumTimeouts = AppiumTimeouts()
+    timeouts: Timeouts = Timeouts()
     trace_mode: TraceMode = TraceMode.RETAIN_ON_FAILURE
     screenshot_mode: ScreenshotMode = ScreenshotMode.ONLY_ON_FAILURE
     artifacts_path: Path = Path(".appwright-artifacts")
@@ -99,7 +106,18 @@ def environment_source() -> AppwrightConfigSource:
         server_url=optional_url(os.environ.get("APPWRIGHT_SERVER_URL")),
         app_package=os.environ.get("APPWRIGHT_PACKAGE"),
         clear_data=optional_boolean(os.environ.get("APPWRIGHT_CLEAR_DATA")),
+        probe_timeout_seconds=optional_float(os.environ.get("APPWRIGHT_PROBE_TIMEOUT_SECONDS")),
+        wait_timeout_seconds=optional_float(os.environ.get("APPWRIGHT_WAIT_TIMEOUT_SECONDS")),
         action_timeout_seconds=optional_float(os.environ.get("APPWRIGHT_ACTION_TIMEOUT_SECONDS")),
+        transition_timeout_seconds=optional_float(
+            os.environ.get("APPWRIGHT_TRANSITION_TIMEOUT_SECONDS")
+        ),
+        interruption_timeout_seconds=optional_float(
+            os.environ.get("APPWRIGHT_INTERRUPTION_TIMEOUT_SECONDS")
+        ),
+        transport_timeout_seconds=optional_float(
+            os.environ.get("APPWRIGHT_TRANSPORT_TIMEOUT_SECONDS")
+        ),
         expect_timeout_seconds=optional_float(os.environ.get("APPWRIGHT_EXPECT_TIMEOUT_SECONDS")),
         stability_window_milliseconds=optional_float(
             os.environ.get("APPWRIGHT_STABILITY_WINDOW_MILLISECONDS")
@@ -137,6 +155,16 @@ def selected_value(
     return default
 
 
+def _effective_wait_timeout_seconds(source: AppwrightConfigSource) -> float | None:
+    """Return the canonical wait budget, falling back to the legacy expect name."""
+
+    return (
+        source.wait_timeout_seconds
+        if source.wait_timeout_seconds is not None
+        else source.expect_timeout_seconds
+    )
+
+
 def load_configuration(
     cli: AppwrightConfigSource | None = None,
     *,
@@ -145,12 +173,24 @@ def load_configuration(
     cli_source = cli if cli is not None else AppwrightConfigSource()
     environment = environment_source()
     file = project_source(pyproject_path)
-    defaults = AppiumTimeouts()
+    defaults = Timeouts()
     server_url = selected_value(
         cli_source.server_url,
         environment.server_url,
         file.server_url,
         None,
+    )
+    probe_seconds = selected_value(
+        cli_source.probe_timeout_seconds,
+        environment.probe_timeout_seconds,
+        file.probe_timeout_seconds,
+        defaults.probe.total_seconds(),
+    )
+    wait_seconds = selected_value(
+        _effective_wait_timeout_seconds(cli_source),
+        _effective_wait_timeout_seconds(environment),
+        _effective_wait_timeout_seconds(file),
+        defaults.wait.total_seconds(),
     )
     action_seconds = selected_value(
         cli_source.action_timeout_seconds,
@@ -158,11 +198,23 @@ def load_configuration(
         file.action_timeout_seconds,
         defaults.action.total_seconds(),
     )
-    expectation_seconds = selected_value(
-        cli_source.expect_timeout_seconds,
-        environment.expect_timeout_seconds,
-        file.expect_timeout_seconds,
-        defaults.expectation.total_seconds(),
+    transition_seconds = selected_value(
+        cli_source.transition_timeout_seconds,
+        environment.transition_timeout_seconds,
+        file.transition_timeout_seconds,
+        defaults.transition.total_seconds(),
+    )
+    interruption_seconds = selected_value(
+        cli_source.interruption_timeout_seconds,
+        environment.interruption_timeout_seconds,
+        file.interruption_timeout_seconds,
+        defaults.interruption.total_seconds(),
+    )
+    transport_seconds = selected_value(
+        cli_source.transport_timeout_seconds,
+        environment.transport_timeout_seconds,
+        file.transport_timeout_seconds,
+        defaults.transport.total_seconds(),
     )
     stability_milliseconds = selected_value(
         cli_source.stability_window_milliseconds,
@@ -187,9 +239,13 @@ def load_configuration(
             file.clear_data,
             False,
         ),
-        timeouts=AppiumTimeouts(
+        timeouts=Timeouts(
+            probe=timedelta(seconds=probe_seconds),
+            wait=timedelta(seconds=wait_seconds),
             action=timedelta(seconds=action_seconds),
-            expectation=timedelta(seconds=expectation_seconds),
+            transition=timedelta(seconds=transition_seconds),
+            interruption=timedelta(seconds=interruption_seconds),
+            transport=timedelta(seconds=transport_seconds),
             stability=timedelta(milliseconds=stability_milliseconds),
         ),
         trace_mode=selected_value(

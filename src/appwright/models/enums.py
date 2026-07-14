@@ -94,6 +94,7 @@ class ErrorCode(StrEnum):
     DEVICE_DISCONNECTED = "device_disconnected"
     EXPECTATION_FAILED = "expectation_failed"
     INVALID_SELECTOR = "invalid_selector"
+    INDETERMINATE_ACTION = "indeterminate_action"
     PROTOCOL_ERROR = "protocol_error"
     SESSION_TAINTED = "session_tainted"
     STRICT_MODE = "strict_mode"

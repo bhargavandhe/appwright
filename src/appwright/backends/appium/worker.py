@@ -17,6 +17,10 @@ Result = TypeVar("Result")
 DEFAULT_CLEANUP_TIMEOUT = timedelta(seconds=10)
 
 
+class InFlightCommandTimeoutError(BackendError):
+    """A submitted worker callable may still execute after its caller timed out."""
+
+
 def configure_transport_timeout(driver: Any, timeout: timedelta) -> None:
     """Apply the current command deadline through Selenium's public client config."""
     command_executor = getattr(driver, "command_executor", None)
@@ -94,7 +98,7 @@ class SessionWorker:
                 raise
             except builtins.TimeoutError:
                 self.mark_tainted()
-                raise BackendError(
+                raise InFlightCommandTimeoutError(
                     BackendFailure(
                         kind=BackendFailureKind.TAINTED,
                         message="Appium command timed out and the session was retired",

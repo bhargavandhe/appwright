@@ -17,13 +17,25 @@ class RetryPolicy(StrictModel):
     maximum_delay: timedelta = Field(default=timedelta(milliseconds=500), gt=timedelta(0))
 
 
-class AppiumTimeouts(StrictModel):
+class Timeouts(StrictModel):
+    probe: timedelta = Field(default=timedelta(seconds=2), gt=timedelta(0))
+    wait: timedelta = Field(default=timedelta(seconds=30), gt=timedelta(0))
     action: timedelta = Field(default=timedelta(seconds=30), gt=timedelta(0))
-    expectation: timedelta = Field(default=timedelta(seconds=5), gt=timedelta(0))
-    stability: timedelta = Field(default=timedelta(milliseconds=200), gt=timedelta(0))
+    transition: timedelta = Field(default=timedelta(seconds=90), gt=timedelta(0))
+    interruption: timedelta = Field(default=timedelta(seconds=30), gt=timedelta(0))
+    stability: timedelta = Field(default=timedelta(milliseconds=300), gt=timedelta(0))
     transport: timedelta = Field(default=timedelta(seconds=120), gt=timedelta(0))
     server_start: timedelta = Field(default=timedelta(seconds=30), gt=timedelta(0))
     retry: RetryPolicy = Field(default_factory=RetryPolicy)
+
+    @property
+    def expectation(self) -> timedelta:
+        """Compatibility view for the pre-screen-kernel expectation budget."""
+
+        return self.wait
+
+
+AppiumTimeouts = Timeouts
 
 
 class AppiumSecurityOptions(StrictModel):
@@ -268,7 +280,7 @@ def redacted_capability_value(value: CapabilityValue) -> CapabilityValue:
 
 class AndroidSessionOptions(StrictModel):
     device: AndroidDeviceSelector
-    timeouts: AppiumTimeouts = AppiumTimeouts()
+    timeouts: Timeouts = Timeouts()
     capabilities: tuple[AdditionalCapability, ...] = ()
 
     @model_validator(mode="after")
@@ -280,7 +292,7 @@ class AndroidSessionOptions(StrictModel):
 class AndroidConnectionOptions(StrictModel):
     selector: AndroidDeviceSelector = AndroidDeviceSelector()
     server: AppiumServer = AppiumServer.local()
-    timeouts: AppiumTimeouts = AppiumTimeouts()
+    timeouts: Timeouts = Timeouts()
     capabilities: tuple[AdditionalCapability, ...] = ()
 
     @model_validator(mode="after")

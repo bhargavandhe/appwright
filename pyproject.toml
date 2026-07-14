@@ -134,6 +134,10 @@ venvPath = "."
 venv = ".venv"
 
 [tool.appwright]
+probe_timeout_seconds = 2
+wait_timeout_seconds = 30
 action_timeout_seconds = 30
-expect_timeout_seconds = 5
-stability_window_milliseconds = 200
+transition_timeout_seconds = 90
+interruption_timeout_seconds = 30
+transport_timeout_seconds = 120
+stability_window_milliseconds = 300

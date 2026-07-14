@@ -69,12 +69,15 @@ Pass a typed timeout model when opening a connection:
 ```python
 from datetime import timedelta
 
-from appwright.models import AppiumTimeouts, RetryPolicy
+from appwright.models import RetryPolicy, Timeouts
 
 
-timeouts = AppiumTimeouts(
+timeouts = Timeouts(
+    probe=timedelta(seconds=2),
+    wait=timedelta(seconds=30),
     action=timedelta(seconds=20),
-    expectation=timedelta(seconds=8),
+    transition=timedelta(seconds=90),
+    interruption=timedelta(seconds=30),
     stability=timedelta(milliseconds=250),
     transport=timedelta(seconds=90),
     server_start=timedelta(seconds=45),
@@ -94,6 +97,8 @@ device = appwright.android.connect(
 An operation's remaining Appwright deadline is translated into its transport timeout. If a
 blocking Appium request is cancelled or times out with an uncertain outcome, Appwright taints the
 session and closes it when the request unwinds instead of reusing potentially inconsistent state.
+`probe`, `wait`, `action`, `transition`, and `interruption` are separate budgets; nested work always
+uses the smaller of its own budget and the remaining parent deadline.
 
 ## Remote authentication
 

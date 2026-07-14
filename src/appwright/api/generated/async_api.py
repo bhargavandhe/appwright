@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, TypeVar, overload
 
 from appwright.assertions.async_assertions import AsyncLocatorAssertions
 from appwright.core.runtime import (
@@ -15,8 +16,10 @@ from appwright.core.runtime import (
     AsyncDevice,
     AsyncKeyboard,
     AsyncLocator,
-    AsyncScreen,
     AsyncTouchscreen,
+)
+from appwright.core.runtime import (
+    AsyncScreen as RuntimeAsyncScreen,
 )
 from appwright.core.runtime import (
     async_appwright as core_async_appwright,
@@ -25,8 +28,8 @@ from appwright.models.config import (
     AdditionalCapability,
     AndroidConnectionOptions,
     AppiumServer,
-    AppiumTimeouts,
     ApplicationOptions,
+    Timeouts,
 )
 from appwright.models.data import (
     DeviceInfo,
@@ -39,10 +42,116 @@ from appwright.models.data import (
     ServerLogRecord,
 )
 from appwright.models.enums import Direction, Key, Role, WaitState
+from appwright.screens.elements import (
+    AsyncButton as AsyncButton,
+)
+from appwright.screens.elements import (
+    AsyncCheckbox as AsyncCheckbox,
+)
+from appwright.screens.elements import (
+    AsyncChoice as AsyncChoice,
+)
+from appwright.screens.elements import (
+    AsyncElement as AsyncElement,
+)
+from appwright.screens.elements import (
+    AsyncScrollable as AsyncScrollable,
+)
+from appwright.screens.elements import (
+    AsyncTextField as AsyncTextField,
+)
+from appwright.screens.elements import (
+    button as button,
+)
+from appwright.screens.elements import (
+    by_accessibility_id as by_accessibility_id,
+)
+from appwright.screens.elements import (
+    by_id as by_id,
+)
+from appwright.screens.elements import (
+    by_role as by_role,
+)
+from appwright.screens.elements import (
+    by_text as by_text,
+)
+from appwright.screens.elements import (
+    checkbox as checkbox,
+)
+from appwright.screens.elements import (
+    choice as choice,
+)
+from appwright.screens.elements import (
+    element as element,
+)
+from appwright.screens.elements import (
+    scrollable as scrollable,
+)
+from appwright.screens.elements import (
+    text_contains as text_contains,
+)
+from appwright.screens.elements import (
+    text_field as text_field,
+)
+from appwright.screens.errors import (
+    LifecycleTimeoutError as LifecycleTimeoutError,
+)
+from appwright.screens.errors import (
+    TransitionFailureError as TransitionFailureError,
+)
+from appwright.screens.errors import (
+    TransitionTimeoutError as TransitionTimeoutError,
+)
+from appwright.screens.interruptions import (
+    InterruptionError as InterruptionError,
+)
+from appwright.screens.model import (
+    AppScope as AppScope,
+)
+from appwright.screens.model import (
+    AsyncDeviceScreen as AsyncDeviceScreen,
+)
+from appwright.screens.model import (
+    AsyncInterruption as AsyncInterruption,
+)
+from appwright.screens.model import (
+    AsyncScreen as AsyncScreen,
+)
+from appwright.screens.model import (
+    DeviceScope as DeviceScope,
+)
+from appwright.screens.model import (
+    Readiness as Readiness,
+)
+from appwright.screens.model import (
+    all_of as all_of,
+)
+from appwright.screens.model import (
+    any_of as any_of,
+)
+from appwright.screens.model import (
+    visible as visible,
+)
+from appwright.screens.recovery import (
+    BackRecovery as BackRecovery,
+)
+from appwright.screens.recovery import (
+    RecoveryError as RecoveryError,
+)
+from appwright.screens.recovery import (
+    back_until as back_until,
+)
+from appwright.screens.runtime import AsyncMobileApp as CanonicalAsyncMobileApp
+from appwright.screens.targets import ScreenChoice as ScreenChoice
+from appwright.screens.targets import ScreenTarget as ScreenTarget
+from appwright.screens.targets import one_of as one_of
+from appwright.screens.transitions import ScreenTimeoutError as ScreenTimeoutError
 from appwright.selectors.models import Selector
 from appwright.tracing import TraceRecorder
 
 TextValue = str
+MobileScreenT = TypeVar("MobileScreenT", bound=AsyncScreen[Any])
+MobileInterruption = AsyncInterruption
 
 
 class Locator:
@@ -86,32 +195,64 @@ class Locator:
             )
         )
 
+    async def probe(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> ElementSnapshot | None:
+        return await self.implementation.probe(timeout)
+
+    async def probe_all(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> tuple[ElementSnapshot, ...]:
+        return await self.implementation.probe_all(timeout)
+
     async def tap(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.tap(force=force, trial=trial, timeout=timeout)
+        await self.implementation.tap(
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def double_tap(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.double_tap(force=force, trial=trial, timeout=timeout)
+        await self.implementation.double_tap(
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def long_press(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.long_press(force=force, trial=trial, timeout=timeout)
+        await self.implementation.long_press(
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def fill(
         self,
@@ -119,18 +260,31 @@ class Locator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.fill(value, force=force, trial=trial, timeout=timeout)
+        await self.implementation.fill(
+            value,
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def clear(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.clear(force=force, trial=trial, timeout=timeout)
+        await self.implementation.clear(
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def press(
         self,
@@ -138,27 +292,46 @@ class Locator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.press(key, force=force, trial=trial, timeout=timeout)
+        await self.implementation.press(
+            key,
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def check(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.check(force=force, trial=trial, timeout=timeout)
+        await self.implementation.check(
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def uncheck(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        await self.implementation.uncheck(force=force, trial=trial, timeout=timeout)
+        await self.implementation.uncheck(
+            force=force,
+            trial=trial,
+            auto_scroll=auto_scroll,
+            timeout=timeout,
+        )
 
     async def swipe(
         self,
@@ -193,6 +366,13 @@ class Locator:
             trial=trial,
             timeout=timeout,
         )
+
+    async def scroll_into_view(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> OperationResult:
+        return await self.implementation.scroll_into_view(timeout=timeout)
 
     async def drag_to(
         self,
@@ -258,7 +438,7 @@ class Locator:
 
 
 class LocatorRoot:
-    def __init__(self, implementation: AsyncApp | AsyncScreen) -> None:
+    def __init__(self, implementation: AsyncApp | RuntimeAsyncScreen) -> None:
         self.implementation = implementation
 
     def locator(self, selector: Selector) -> Locator:
@@ -292,6 +472,73 @@ class LocatorRoot:
         return Locator(self.implementation.get_by_role(role, name=name, exact=exact))
 
 
+class MobileApp:
+    """Public typed-screen facade backed by the canonical async runtime."""
+
+    def __init__(self, implementation: CanonicalAsyncMobileApp) -> None:
+        self.implementation = implementation
+
+    async def wait_for(
+        self,
+        screen_type: type[MobileScreenT],
+        *,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT:
+        return await self.implementation.wait_for(screen_type, timeout=timeout)
+
+    async def wait_for_any(
+        self,
+        target: ScreenTarget[MobileScreenT],
+        *,
+        timeout: timedelta | None = None,
+    ) -> ScreenChoice[MobileScreenT]:
+        return await self.implementation.wait_for_any(target, timeout=timeout)
+
+    @overload
+    async def settle(
+        self,
+        screen: type[MobileScreenT],
+        *,
+        stable_for: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT: ...
+
+    @overload
+    async def settle(
+        self,
+        screen: MobileScreenT,
+        *,
+        stable_for: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT: ...
+
+    async def settle(
+        self,
+        screen: type[MobileScreenT] | MobileScreenT,
+        *,
+        stable_for: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT:
+        return await self.implementation.settle(
+            screen,
+            stable_for=stable_for,
+            timeout=timeout,
+        )
+
+    async def ensure(
+        self,
+        screen_type: type[MobileScreenT],
+        *,
+        recovery: BackRecovery[MobileScreenT] | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT:
+        return await self.implementation.ensure(
+            screen_type,
+            recovery=recovery,
+            timeout=timeout,
+        )
+
+
 class App(LocatorRoot):
     def __init__(self, implementation: AsyncApp) -> None:
         super().__init__(implementation)
@@ -300,6 +547,20 @@ class App(LocatorRoot):
     @property
     def package_name(self) -> str:
         return self.app_implementation.package_name
+
+    def mobile(
+        self,
+        *,
+        interruptions: tuple[type[MobileInterruption[Any]], ...] = (),
+        max_dismissals: int = 8,
+    ) -> MobileApp:
+        return MobileApp(
+            CanonicalAsyncMobileApp(
+                self.app_implementation,
+                interruptions=interruptions,
+                max_dismissals=max_dismissals,
+            )
+        )
 
     async def activate(self) -> None:
         await self.app_implementation.activate()
@@ -418,7 +679,7 @@ class Android:
         *,
         serial: str | None = None,
         server: AppiumServer | None = None,
-        timeouts: AppiumTimeouts | None = None,
+        timeouts: Timeouts | None = None,
         capabilities: tuple[AdditionalCapability, ...] = (),
     ) -> Device:
         implementation = await self.implementation.connect(

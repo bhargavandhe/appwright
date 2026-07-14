@@ -27,7 +27,12 @@ Appwright
         ├── touchscreen: Touchscreen
         ├── tracing: TraceRecorder
         └── launch_app(...) -> App
-            └── locator factories -> Locator
+            ├── locator factories -> Locator
+            └── mobile(...) -> MobileApp
+                ├── wait_for(Screen)
+                ├── wait_for_any(one_of(...))
+                ├── settle(Screen)
+                └── ensure(Screen, recovery=back_until(...))
 ```
 
 The async graph is identical. Methods that perform I/O return awaitables.
@@ -101,6 +106,29 @@ and composition semantics.
 - `reset()`;
 - `screenshot()`; and
 - `close()`.
+
+## Typed screens and mobile lifecycle
+
+The synchronous facade exports `Screen`, `DeviceScreen`, `Interruption`, typed control builders
+(`element`, `button`, `text_field`, `checkbox`, `choice`, and `scrollable`), selector helpers, and
+the readiness combinators `visible`, `all_of`, and `any_of`. The asynchronous equivalents are
+`AsyncScreen`, `AsyncDeviceScreen`, and `AsyncInterruption`.
+
+Call `App.mobile(interruptions=(...))` to create the device-session lifecycle facade. It provides:
+
+- `wait_for(ScreenType)` for one bounded transition;
+- `wait_for_any(one_of(A, B, ...))` for an atomic screen race;
+- `settle(screen, stable_for=...)` for a stable destination;
+- `ensure(ScreenType, recovery=back_until(...))` for bounded Back recovery; and
+- `cancelled_transition_receipt` for diagnosing cancellation after action dispatch.
+
+Controls expose only valid capabilities: buttons tap, text fields fill, choices select, and
+scrollables move the viewport. `tap_then()` and `select_then()` combine dispatch with destination
+waiting and preserve an `ActionReceipt` when dispatch becomes indeterminate. Registered
+interruptions are prioritized, dismissal-count bounded, and share the parent transition deadline.
+
+Use `DeviceScreen` for Android permission dialogs or other device-owned surfaces. Ordinary
+`Screen` selectors remain scoped to the active app package.
 
 ## `Locator`
 

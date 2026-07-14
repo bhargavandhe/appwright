@@ -3,10 +3,11 @@
 import asyncio
 import threading
 from datetime import timedelta
+from functools import partial
 
 import pytest
 
-from appwright.backends.appium.worker import SessionWorker
+from appwright.backends.appium.worker import InFlightCommandTimeoutError, SessionWorker
 from appwright.backends.base import BackendError
 from appwright.models.enums import SessionState
 
@@ -77,7 +78,7 @@ async def test_timeout_taints_and_rejects_follow_up_commands() -> None:
     def blocking_operation(selected_driver: FakeDriver) -> None:
         release.wait(timeout=2)
 
-    with pytest.raises(BackendError):
+    with pytest.raises(InFlightCommandTimeoutError):
         await worker.invoke(blocking_operation, timedelta(milliseconds=1))
     assert worker.state is SessionState.TAINTED
     with pytest.raises(BackendError):
@@ -112,14 +113,15 @@ async def test_concurrent_callers_execute_in_submission_order() -> None:
     worker = await SessionWorker.create(lambda: driver, timedelta(seconds=1))
     order: list[int] = []
 
-    def operation(value: int) -> int:
+    def operation(selected_driver: FakeDriver, *, value: int) -> int:
+        assert selected_driver is driver
         order.append(value)
         return value
 
     tasks = tuple(
         asyncio.create_task(
             worker.invoke(
-                lambda selected_driver, value=value: operation(value),
+                partial(operation, value=value),
                 timedelta(seconds=1),
             )
         )

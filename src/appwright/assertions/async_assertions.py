@@ -8,8 +8,9 @@ from datetime import timedelta
 from appwright.backends.base import BackendError, RecoverableBackendError
 from appwright.core.errors import ExpectationError
 from appwright.core.runtime import AsyncLocator, error_details, trace_event
-from appwright.models.data import Deadline, ElementSnapshot
+from appwright.models.data import CallLogEntry, ElementSnapshot, QueryResult
 from appwright.models.enums import ErrorCode, TraceEventKind
+from appwright.operations import OperationDeadline
 
 ElementPredicate = Callable[[tuple[ElementSnapshot, ...]], bool]
 
@@ -33,7 +34,8 @@ class AsyncLocatorAssertions:
         self,
         expected: str,
         received: str,
-        deadline: Deadline,
+        deadline: OperationDeadline,
+        call_log: tuple[CallLogEntry, ...],
     ) -> ExpectationError:
         plan = self.locator.plan()
         details = self.locator.device.enrich_error(
@@ -45,6 +47,7 @@ class AsyncLocatorAssertions:
                 elapsed=deadline.elapsed(),
                 expected=expected,
                 received=received,
+                call_log=call_log,
             )
         )
         self.locator.device.tracing.record(
@@ -64,22 +67,43 @@ class AsyncLocatorAssertions:
         timeout: timedelta | None = None,
         strict: bool = True,
     ) -> None:
-        selected_timeout = (
-            timeout if timeout is not None else self.locator.device.timeouts.expectation
-        )
-        deadline = Deadline.start(selected_timeout)
+        selected_timeout = timeout if timeout is not None else self.locator.device.timeouts.wait
+        deadline = OperationDeadline.start(selected_timeout)
         delay = self.locator.device.timeouts.retry.initial_delay
+        call_log: list[CallLogEntry] = []
+        last_result: QueryResult | None = None
         received = "no elements"
         effective_expected = f"not {expected}" if self.negated else expected
         while True:
             if deadline.expired():
-                raise self.expectation_failure(effective_expected, received, deadline)
+                if strict and last_result is not None and len(last_result.elements) > 1:
+                    self.locator.strict_element(
+                        last_result,
+                        "expect",
+                        self.locator.plan(),
+                        elapsed=deadline.elapsed(),
+                        call_log=tuple(call_log),
+                    )
+                raise self.expectation_failure(
+                    effective_expected,
+                    received,
+                    deadline,
+                    tuple(call_log),
+                )
             try:
                 result = await self.locator.query_once(deadline.remaining())
+                observation_valid = True
             except RecoverableBackendError as error:
                 received = error.failure.message
+                call_log.append(
+                    CallLogEntry(
+                        message=received,
+                        elapsed=deadline.elapsed(),
+                    )
+                )
                 if deadline.expired():
                     result = None
+                    observation_valid = False
                 else:
                     await self.locator.wait_before_retry(delay, deadline)
                     delay = self.locator.next_delay(delay)
@@ -91,13 +115,27 @@ class AsyncLocatorAssertions:
                     self.locator.plan(),
                 ) from error
             if result is not None:
+                last_result = result
                 received = self.describe(result.elements)
-                if strict and len(result.elements) > 1:
-                    self.locator.strict_element(result, "expect", self.locator.plan())
-                matched = predicate(result.elements)
+                ambiguous = strict and len(result.elements) > 1
+                if ambiguous:
+                    call_log.append(
+                        CallLogEntry(
+                            message=f"locator resolved to {len(result.elements)} elements",
+                            elapsed=deadline.elapsed(),
+                        )
+                    )
+                    matched = False
+                else:
+                    matched = predicate(result.elements)
             else:
+                ambiguous = False
                 matched = False
-            satisfied = not matched if self.negated else matched
+            satisfied = (
+                False
+                if ambiguous or not observation_valid
+                else (not matched if self.negated else matched)
+            )
             if satisfied:
                 self.locator.device.tracing.record(
                     trace_event(
@@ -112,7 +150,20 @@ class AsyncLocatorAssertions:
                 )
                 return
             if deadline.expired():
-                raise self.expectation_failure(effective_expected, received, deadline)
+                if strict and last_result is not None and len(last_result.elements) > 1:
+                    self.locator.strict_element(
+                        last_result,
+                        "expect",
+                        self.locator.plan(),
+                        elapsed=deadline.elapsed(),
+                        call_log=tuple(call_log),
+                    )
+                raise self.expectation_failure(
+                    effective_expected,
+                    received,
+                    deadline,
+                    tuple(call_log),
+                )
             await self.locator.wait_before_retry(delay, deadline)
             delay = self.locator.next_delay(delay)
 

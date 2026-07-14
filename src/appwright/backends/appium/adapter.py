@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
@@ -15,6 +16,7 @@ from selenium.common.exceptions import (
     InvalidSessionIdException,
     NoSuchElementException,
     StaleElementReferenceException,
+    UnknownMethodException,
     WebDriverException,
 )
 
@@ -29,11 +31,12 @@ from appwright.backends.appium.models import (
     SwipeGestureArguments,
 )
 from appwright.backends.appium.service import ManagedAppiumService
-from appwright.backends.appium.worker import SessionWorker
+from appwright.backends.appium.worker import InFlightCommandTimeoutError, SessionWorker
 from appwright.backends.base import (
     BackendError,
     BackendFailure,
     BackendFailureKind,
+    IndeterminateActionBackendError,
     RecoverableBackendError,
 )
 from appwright.models.config import (
@@ -65,6 +68,14 @@ from appwright.models.enums import (
     LocatorStrategy,
     MobileCommand,
     ServerMode,
+)
+from appwright.operations import (
+    ActionReceipt,
+    DispatchState,
+    OperationDeadline,
+    OperationStage,
+    actionability_problem,
+    replay_safety_for,
 )
 from appwright.selectors.compiler import LocatorPlan
 
@@ -181,6 +192,15 @@ def string_attribute(element: Any, name: str) -> str:
     return "" if value is None else str(value)
 
 
+def optional_string_attribute(element: Any, *names: str) -> str:
+    for name in names:
+        try:
+            return string_attribute(element, name)
+        except UnknownMethodException:
+            continue
+    return ""
+
+
 def snapshot_element(element: Any) -> ElementSnapshot:
     class_name = string_attribute(element, "className")
     return ElementSnapshot(
@@ -199,7 +219,7 @@ def snapshot_element(element: Any) -> ElementSnapshot:
         focused=boolean_attribute(element, "focused"),
         editable=class_name.endswith("EditText"),
         bounds=Rect.model_validate(element.rect),
-        window_id=string_attribute(element, "window-id"),
+        window_id=optional_string_attribute(element, "windowId", "window-id"),
     )
 
 
@@ -230,7 +250,124 @@ def execute_query(driver: Any, plan: LocatorPlan) -> QueryResult:
         ) from error
 
 
-def execute_action(driver: Any, plan: LocatorPlan, request: ActionRequest) -> ActionResult:
+def submit_action(driver: Any, element: Any, request: ActionRequest) -> None:
+    """Submit exactly one logical action after the dispatch boundary has been crossed."""
+
+    if request.kind is ActionKind.TAP:
+        element.click()
+    elif request.kind is ActionKind.DOUBLE_TAP:
+        double_tap_arguments = ElementGestureArguments(element_id=str(element.id))
+        driver.execute_script(
+            MobileCommand.DOUBLE_CLICK_GESTURE.value,
+            double_tap_arguments.model_dump(by_alias=True, exclude_none=True),
+        )
+    elif request.kind is ActionKind.LONG_PRESS:
+        long_press_arguments = ElementGestureArguments(element_id=str(element.id))
+        driver.execute_script(
+            MobileCommand.LONG_CLICK_GESTURE.value,
+            long_press_arguments.model_dump(by_alias=True, exclude_none=True),
+        )
+    elif request.kind is ActionKind.FILL:
+        element.clear()
+        element.send_keys(request.text or "")
+    elif request.kind is ActionKind.CLEAR:
+        element.clear()
+    elif request.kind is ActionKind.PRESS:
+        element.send_keys(request.key or "")
+    elif request.kind in {ActionKind.CHECK, ActionKind.UNCHECK}:
+        element.click()
+    elif request.kind is ActionKind.SWIPE:
+        direction = request.direction
+        if direction is None:
+            raise ValueError("swipe requires a direction")
+        swipe_arguments = SwipeGestureArguments(
+            element_id=str(element.id),
+            direction=direction,
+            percent=request.percent or 0.75,
+        )
+        driver.execute_script(
+            MobileCommand.SWIPE_GESTURE.value,
+            swipe_arguments.model_dump(mode="json", by_alias=True, exclude_none=True),
+        )
+    elif request.kind is ActionKind.SCROLL:
+        direction = request.direction
+        if direction is None:
+            raise ValueError("scroll requires a direction")
+        scroll_arguments = ScrollGestureArguments(
+            element_id=str(element.id),
+            direction=direction,
+            percent=request.percent or 0.75,
+        )
+        driver.execute_script(
+            MobileCommand.SCROLL_GESTURE.value,
+            scroll_arguments.model_dump(mode="json", by_alias=True, exclude_none=True),
+        )
+    elif request.kind in {ActionKind.DRAG_TO, ActionKind.SCREENSHOT}:
+        raise BackendError(
+            BackendFailure(
+                kind=BackendFailureKind.UNKNOWN,
+                message=f"{request.kind.value} uses a dedicated backend command",
+            )
+        )
+    else:
+        raise BackendError(
+            BackendFailure(
+                kind=BackendFailureKind.UNKNOWN,
+                message=f"action is not implemented: {request.kind.value}",
+            )
+        )
+
+
+@dataclass(slots=True)
+class DispatchBoundary:
+    """Thread-visible marker for whether command submission has started."""
+
+    pending: ActionReceipt
+    submitted_at: datetime | None = None
+
+    def mark_submitted(self) -> datetime:
+        submitted_at = datetime.now(UTC)
+        self.submitted_at = submitted_at
+        return submitted_at
+
+    def unknown_receipt(self) -> ActionReceipt:
+        return self.pending.model_copy(
+            update={
+                "stage": OperationStage.DISPATCH,
+                "dispatch_state": DispatchState.UNKNOWN,
+            }
+        )
+
+
+def create_dispatch_boundary(
+    plan: LocatorPlan,
+    request: ActionRequest,
+    pre_action: ElementSnapshot,
+) -> DispatchBoundary:
+    return DispatchBoundary(
+        pending=ActionReceipt(
+            action=request.kind,
+            locator=plan.description,
+            replay_safety=replay_safety_for(request.kind),
+            stage=OperationStage.RESOLVE,
+            dispatch_state=DispatchState.NOT_DISPATCHED,
+            started_at=datetime.now(UTC),
+            pre_action=pre_action,
+        )
+    )
+
+
+def execute_dispatch(
+    driver: Any,
+    plan: LocatorPlan,
+    request: ActionRequest,
+    pre_action: ElementSnapshot,
+    boundary: DispatchBoundary | None = None,
+) -> ActionReceipt:
+    """Resolve a live element and cross the command-submission boundary at most once."""
+
+    active_boundary = boundary or create_dispatch_boundary(plan, request, pre_action)
+    pending = active_boundary.pending
     try:
         elements = find_elements(driver, plan)
         if len(elements) != 1:
@@ -242,79 +379,90 @@ def execute_action(driver: Any, plan: LocatorPlan, request: ActionRequest) -> Ac
                 )
             )
         element = elements[0]
-        if not request.trial:
-            if request.kind is ActionKind.TAP:
-                element.click()
-            elif request.kind is ActionKind.DOUBLE_TAP:
-                double_tap_arguments = ElementGestureArguments(element_id=str(element.id))
-                driver.execute_script(
-                    MobileCommand.DOUBLE_CLICK_GESTURE.value,
-                    double_tap_arguments.model_dump(by_alias=True, exclude_none=True),
+        live_snapshot = snapshot_element(element)
+        if live_snapshot.identity != pre_action.identity:
+            raise RecoverableBackendError(
+                BackendFailure(
+                    kind=BackendFailureKind.RECOVERABLE,
+                    message="locator changed between resolution and dispatch",
                 )
-            elif request.kind is ActionKind.LONG_PRESS:
-                long_press_arguments = ElementGestureArguments(element_id=str(element.id))
-                driver.execute_script(
-                    MobileCommand.LONG_CLICK_GESTURE.value,
-                    long_press_arguments.model_dump(by_alias=True, exclude_none=True),
+            )
+        active_boundary.pending = pending.model_copy(update={"pre_action": live_snapshot})
+        pending = active_boundary.pending
+        problem = None if request.force else actionability_problem(live_snapshot, request.kind)
+        if problem is not None:
+            raise RecoverableBackendError(
+                BackendFailure(
+                    kind=BackendFailureKind.RECOVERABLE,
+                    message=problem,
                 )
-            elif request.kind is ActionKind.FILL:
-                element.clear()
-                element.send_keys(request.text or "")
-            elif request.kind is ActionKind.CLEAR:
-                element.clear()
-            elif request.kind is ActionKind.PRESS:
-                element.send_keys(request.key or "")
-            elif request.kind in {ActionKind.CHECK, ActionKind.UNCHECK}:
-                checked = boolean_attribute(element, "checked")
-                if (request.kind is ActionKind.CHECK and not checked) or (
-                    request.kind is ActionKind.UNCHECK and checked
-                ):
-                    element.click()
-            elif request.kind is ActionKind.SWIPE:
-                direction = request.direction
-                if direction is None:
-                    raise ValueError("swipe requires a direction")
-                swipe_arguments = SwipeGestureArguments(
-                    element_id=str(element.id),
-                    direction=direction,
-                    percent=request.percent or 0.75,
+            )
+        if request.trial:
+            return pending
+        if request.kind in {ActionKind.CHECK, ActionKind.UNCHECK}:
+            desired = request.kind is ActionKind.CHECK
+            if live_snapshot.checked is desired:
+                return pending
+        if request.kind in {ActionKind.DRAG_TO, ActionKind.SCREENSHOT}:
+            raise BackendError(
+                BackendFailure(
+                    kind=BackendFailureKind.UNKNOWN,
+                    message=f"{request.kind.value} uses a dedicated backend command",
                 )
-                driver.execute_script(
-                    MobileCommand.SWIPE_GESTURE.value,
-                    swipe_arguments.model_dump(mode="json", by_alias=True, exclude_none=True),
-                )
-            elif request.kind is ActionKind.SCROLL:
-                direction = request.direction
-                if direction is None:
-                    raise ValueError("scroll requires a direction")
-                scroll_arguments = ScrollGestureArguments(
-                    element_id=str(element.id),
-                    direction=direction,
-                    percent=request.percent or 0.75,
-                )
-                driver.execute_script(
-                    MobileCommand.SCROLL_GESTURE.value,
-                    scroll_arguments.model_dump(mode="json", by_alias=True, exclude_none=True),
-                )
-            elif request.kind in {ActionKind.DRAG_TO, ActionKind.SCREENSHOT}:
-                raise BackendError(
-                    BackendFailure(
-                        kind=BackendFailureKind.UNKNOWN,
-                        message=f"{request.kind.value} uses a dedicated backend command",
-                    )
-                )
-            else:
-                raise BackendError(
-                    BackendFailure(
-                        kind=BackendFailureKind.UNKNOWN,
-                        message=f"action is not implemented: {request.kind.value}",
-                    )
-                )
-        return ActionResult(element=snapshot_element(element))
+            )
+
+        submitted_at = active_boundary.mark_submitted()
+        try:
+            submit_action(driver, element, request)
+        except WebDriverException as error:
+            raise IndeterminateActionBackendError(
+                BackendFailure(
+                    kind=BackendFailureKind.UNKNOWN,
+                    message=str(error),
+                    appium_command=action_mobile_command(request.kind),
+                ),
+                active_boundary.unknown_receipt(),
+            ) from error
+        return pending.model_copy(
+            update={
+                "stage": OperationStage.DISPATCH,
+                "dispatch_state": DispatchState.DISPATCHED,
+                "dispatched_at": submitted_at,
+            }
+        )
+    except InvalidSessionIdException as error:
+        raise BackendError(
+            BackendFailure(kind=BackendFailureKind.NOT_STARTED, message=str(error))
+        ) from error
     except (StaleElementReferenceException, NoSuchElementException) as error:
         raise RecoverableBackendError(
             BackendFailure(kind=BackendFailureKind.RECOVERABLE, message=str(error))
         ) from error
+    except WebDriverException as error:
+        raise RecoverableBackendError(
+            BackendFailure(kind=BackendFailureKind.RECOVERABLE, message=str(error))
+        ) from error
+
+
+def execute_action(driver: Any, plan: LocatorPlan, request: ActionRequest) -> ActionResult:
+    """Compatibility action path implemented through resolve then dispatch."""
+
+    result = execute_query(driver, plan)
+    if len(result.elements) != 1:
+        raise BackendError(
+            BackendFailure(
+                kind=BackendFailureKind.MATCH_COUNT,
+                message=f"locator resolved to {len(result.elements)} elements",
+                match_count=len(result.elements),
+            )
+        )
+    pre_action = result.elements[0]
+    execute_dispatch(driver, plan, request, pre_action)
+    if request.kind in {ActionKind.CHECK, ActionKind.UNCHECK} and not request.trial:
+        return ActionResult(
+            element=pre_action.model_copy(update={"checked": request.kind is ActionKind.CHECK})
+        )
+    return ActionResult(element=pre_action)
 
 
 def strict_driver_element(driver: Any, plan: LocatorPlan) -> Any:
@@ -419,6 +567,8 @@ class AppiumBackend:
         if access_key is None:
             return message
         secret = access_key.get_secret_value()
+        if not secret:
+            return message
         return message.replace(secret, "[REDACTED]")
 
     def sanitize_server_logs(
@@ -443,6 +593,27 @@ class AppiumBackend:
         worker = self.require_worker()
         try:
             return await worker.invoke(operation, timeout)
+        except IndeterminateActionBackendError as error:
+            failure = error.failure
+            raise IndeterminateActionBackendError(
+                BackendFailure(
+                    kind=failure.kind,
+                    message=self.sanitize_message(failure.message),
+                    match_count=failure.match_count,
+                    appium_command=failure.appium_command or command,
+                ),
+                error.receipt,
+            ) from error
+        except InFlightCommandTimeoutError as error:
+            failure = error.failure
+            raise InFlightCommandTimeoutError(
+                BackendFailure(
+                    kind=failure.kind,
+                    message=self.sanitize_message(failure.message),
+                    match_count=failure.match_count,
+                    appium_command=failure.appium_command or command,
+                )
+            ) from error
         except RecoverableBackendError as error:
             failure = error.failure
             raise RecoverableBackendError(
@@ -579,8 +750,50 @@ class AppiumBackend:
             )
         return self.worker
 
-    async def query(self, plan: LocatorPlan, timeout: timedelta) -> QueryResult:
+    async def observe(self, timeout: timedelta) -> HierarchySource:
+        content = await self.invoke(lambda driver: str(driver.page_source), timeout)
+        return HierarchySource(content=content)
+
+    async def resolve(self, plan: LocatorPlan, timeout: timedelta) -> QueryResult:
         return await self.invoke(lambda driver: execute_query(driver, plan), timeout)
+
+    async def dispatch(
+        self,
+        plan: LocatorPlan,
+        request: ActionRequest,
+        pre_action: ElementSnapshot,
+        timeout: timedelta,
+    ) -> ActionReceipt:
+        boundary = create_dispatch_boundary(plan, request, pre_action)
+        try:
+            return await self.invoke(
+                lambda driver: execute_dispatch(
+                    driver,
+                    plan,
+                    request,
+                    pre_action,
+                    boundary,
+                ),
+                timeout,
+                action_mobile_command(request.kind),
+            )
+        except IndeterminateActionBackendError:
+            raise
+        except InFlightCommandTimeoutError as error:
+            raise IndeterminateActionBackendError(
+                error.failure,
+                boundary.unknown_receipt(),
+            ) from error
+        except BackendError as error:
+            if boundary.submitted_at is None:
+                raise
+            raise IndeterminateActionBackendError(
+                error.failure,
+                boundary.unknown_receipt(),
+            ) from error
+
+    async def query(self, plan: LocatorPlan, timeout: timedelta) -> QueryResult:
+        return await self.resolve(plan, timeout)
 
     async def perform(
         self,
@@ -588,11 +801,30 @@ class AppiumBackend:
         request: ActionRequest,
         timeout: timedelta,
     ) -> ActionResult:
-        return await self.invoke(
-            lambda driver: execute_action(driver, plan, request),
-            timeout,
-            action_mobile_command(request.kind),
-        )
+        deadline = OperationDeadline.start(timeout)
+        result = await self.resolve(plan, deadline.remaining())
+        if len(result.elements) != 1:
+            raise BackendError(
+                BackendFailure(
+                    kind=BackendFailureKind.MATCH_COUNT,
+                    message=f"locator resolved to {len(result.elements)} elements",
+                    match_count=len(result.elements),
+                )
+            )
+        pre_action = result.elements[0]
+        if deadline.expired():
+            raise RecoverableBackendError(
+                BackendFailure(
+                    kind=BackendFailureKind.RECOVERABLE,
+                    message="action deadline expired before dispatch",
+                )
+            )
+        await self.dispatch(plan, request, pre_action, deadline.remaining())
+        if request.kind in {ActionKind.CHECK, ActionKind.UNCHECK} and not request.trial:
+            return ActionResult(
+                element=pre_action.model_copy(update={"checked": request.kind is ActionKind.CHECK})
+            )
+        return ActionResult(element=pre_action)
 
     async def screenshot(self, path: Path | None, timeout: timedelta) -> Screenshot:
         content = await self.invoke(lambda driver: capture_screenshot(driver, path), timeout)
@@ -634,8 +866,7 @@ class AppiumBackend:
         )
 
     async def hierarchy(self, timeout: timedelta) -> HierarchySource:
-        content = await self.invoke(lambda driver: str(driver.page_source), timeout)
-        return HierarchySource(content=content)
+        return await self.observe(timeout)
 
     async def read_server_logs(self) -> tuple[ServerLogRecord, ...]:
         service = self.service

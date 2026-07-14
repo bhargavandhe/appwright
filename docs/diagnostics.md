@@ -49,6 +49,34 @@ The public hierarchy includes:
 - `ProtocolError`; and
 - `UnsupportedOperationError`.
 
+Typed-screen operations add structured lifecycle evidence:
+
+- `ScreenTimeoutError` retains candidate readiness summaries from bounded whole-device
+  observations;
+- `TransitionTimeoutError` retains the exact action receipt and destination history;
+- `InterruptionError` retains bounded dismissal history plus the total event count;
+- `RecoveryError` retains bounded BACK attempts and observation history; and
+- `IndeterminateActionError` retains an `ActionReceipt` when Appwright cannot prove whether a
+  non-replayable command reached the device.
+
+```python
+from appwright.errors import IndeterminateActionError, TransitionTimeoutError
+
+
+try:
+    home = login.submit.tap_then(Home)
+except TransitionTimeoutError as error:
+    print(error.receipt.dispatch_state)
+    print(error.transition_history.observations)
+    raise
+except IndeterminateActionError as error:
+    print(error.receipt.replay_safety)
+    raise
+```
+
+Appwright retries resolution and observation before dispatch. Once a tap, key press, or gesture
+may have been submitted, it never guesses by replaying it.
+
 ## Pytest artifacts
 
 With the default policy, a failing test using `android_device` or `mobile_app` receives:

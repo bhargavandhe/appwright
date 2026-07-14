@@ -197,8 +197,8 @@ For example:
 | `drag_to()` | visible and stable source and target |
 
 Stability compares UI snapshots across the configured quiet window. Recoverable stale-element
-failures trigger re-resolution. Off-screen actions can attempt an Android scroll gesture before
-retrying.
+failures trigger re-resolution. Missing or off-screen targets never scroll implicitly: call
+`scroll_into_view()` or opt in per action with `auto_scroll=True`.
 
 Override the action deadline with `datetime.timedelta`:
 
@@ -216,6 +216,8 @@ actionability checks, but never skips existence or strictness:
 button = app.get_by_text("Continue")
 button.tap(trial=True)
 button.tap(force=True)
+button.tap(auto_scroll=True)
+button.scroll_into_view()
 ```
 
 ## Actions
@@ -255,6 +257,8 @@ device.touchscreen.tap(Point(x=120, y=640))
 Queries inspect one strict match:
 
 ```python
+snapshot = locator.probe()       # ElementSnapshot | None; duplicates are an error
+snapshots = locator.probe_all()  # every current match, without strictness
 locator.is_visible()
 locator.is_enabled()
 locator.is_checked()
@@ -265,7 +269,8 @@ locator.element_info()
 ```
 
 Boolean state queries return `False` for no match and still reject duplicate matches. For test
-synchronization, prefer retrying assertions over immediate query assertions.
+synchronization, prefer retrying assertions or typed screen readiness over immediate query
+assertions. `probe()` uses the short probe budget; it is not a transition wait.
 
 ```python
 from appwright.models import WaitState

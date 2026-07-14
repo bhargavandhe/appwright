@@ -14,6 +14,8 @@ Python-native testing experience on top.
 - Automatic waiting for visibility, enabled state, editability, and stable bounds
 - Strict single-element actions that fail clearly on ambiguous matches
 - Matching synchronous and asynchronous APIs
+- Typed screen models, capability-safe controls, and bounded transition waits
+- Prioritized interstitial handling and bounded Back recovery for real mobile journeys
 - Pydantic models and enums instead of capability dictionaries and magic strings
 - Failure screenshots, hierarchy dumps, Appium logs, and portable trace archives
 - Managed local Appium servers or existing remote/grid/cloud endpoints
@@ -78,6 +80,47 @@ The pytest plugin manages the Appium session. When a test fails, diagnostics are
 
 See the [complete quickstart](docs/quickstart.md) for Android SDK setup, emulator/device checks,
 environment-variable configuration, and common first-run errors.
+
+## Typed mobile journeys
+
+Use screen definitions for multi-screen flows. A transition observes the UI atomically, handles
+registered interstitials inside the same deadline, and returns the destination with typed controls.
+
+```python
+from appwright.sync_api import (
+    Interruption, Screen, button, by_id, text_field, visible,
+)
+
+
+class PasskeyPrompt(Interruption):
+    priority = 100
+    ready = visible(by_id("com.example:id/maybe_later"))
+    later = button(by_id("com.example:id/maybe_later"))
+
+    def dismiss(self) -> None:
+        self.later.tap()
+
+
+class Login(Screen):
+    ready = visible(by_id("com.example:id/sign_in"))
+    email = text_field(by_id("com.example:id/email"))
+    submit = button(by_id("com.example:id/sign_in"))
+
+
+class Home(Screen):
+    ready = visible(by_id("com.example:id/home"))
+
+
+mobile = app.mobile(interruptions=(PasskeyPrompt,))
+login = mobile.wait_for(Login)
+login.email.fill("user@example.com")
+home = login.submit.tap_then(Home)
+mobile.settle(home)
+```
+
+The async facade uses `AsyncScreen` and `AsyncInterruption`, with the same model and awaited
+control operations. Low-level `Locator` APIs remain available as an escape hatch for exploratory
+work and isolated actions.
 
 ## Direct synchronous API
 

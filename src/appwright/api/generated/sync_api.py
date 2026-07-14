@@ -7,7 +7,8 @@ import asyncio
 from collections.abc import Coroutine
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, TypeVar
+from threading import get_ident
+from typing import Any, TypeVar, overload
 
 from greenlet import getcurrent, greenlet
 
@@ -29,8 +30,8 @@ from appwright.models.config import (
     AdditionalCapability,
     AndroidConnectionOptions,
     AppiumServer,
-    AppiumTimeouts,
     ApplicationOptions,
+    Timeouts,
 )
 from appwright.models.data import (
     DeviceInfo,
@@ -43,10 +44,22 @@ from appwright.models.data import (
     ServerLogRecord,
 )
 from appwright.models.enums import Direction, Key, Role, WaitState
+from appwright.operations import ActionReceipt
+from appwright.screens.model import (
+    Interruption,
+)
+from appwright.screens.model import (
+    Screen as ScreenDefinition,
+)
+from appwright.screens.recovery import BackRecovery
+from appwright.screens.sync_runtime import CanonicalSyncMobileApp
+from appwright.screens.targets import ScreenChoice, ScreenTarget
 from appwright.selectors.models import Selector
 from appwright.tracing import TraceRecorder
 
 Result = TypeVar("Result")
+MobileScreenT = TypeVar("MobileScreenT", bound=ScreenDefinition[Any])
+MobileInterruption = Interruption
 TextValue = str
 
 
@@ -56,6 +69,7 @@ class SyncRunner:
         self.owner = getcurrent()
         self.dispatcher = greenlet(self.dispatch_loop)
         self.closed = False
+        self.owner_thread_id = get_ident()
 
     def dispatch_loop(self) -> None:
         asyncio.set_event_loop(self.loop)
@@ -68,6 +82,8 @@ class SyncRunner:
         if self.closed:
             coroutine.close()
             raise RuntimeError("synchronous Appwright context is closed")
+        if get_ident() != self.owner_thread_id:
+            return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
         task = self.loop.create_task(coroutine)
         task.add_done_callback(self.return_to_owner)
         while not task.done():
@@ -126,32 +142,70 @@ class Locator:
             self.runner,
         )
 
+    def probe(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> ElementSnapshot | None:
+        return self.runner.run(self.implementation.probe(timeout))
+
+    def probe_all(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> tuple[ElementSnapshot, ...]:
+        return self.runner.run(self.implementation.probe_all(timeout))
+
     def tap(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.tap(force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.tap(
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def double_tap(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.double_tap(force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.double_tap(
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def long_press(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.long_press(force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.long_press(
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def fill(
         self,
@@ -159,18 +213,35 @@ class Locator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.fill(value, force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.fill(
+                value,
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def clear(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.clear(force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.clear(
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def press(
         self,
@@ -178,27 +249,52 @@ class Locator:
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.press(key, force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.press(
+                key,
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def check(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.check(force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.check(
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def uncheck(
         self,
         *,
         force: bool = False,
         trial: bool = False,
+        auto_scroll: bool = False,
         timeout: timedelta | None = None,
     ) -> None:
-        self.runner.run(self.implementation.uncheck(force=force, trial=trial, timeout=timeout))
+        self.runner.run(
+            self.implementation.uncheck(
+                force=force,
+                trial=trial,
+                auto_scroll=auto_scroll,
+                timeout=timeout,
+            )
+        )
 
     def wait_for(
         self,
@@ -277,6 +373,13 @@ class Locator:
             )
         )
 
+    def scroll_into_view(
+        self,
+        *,
+        timeout: timedelta | None = None,
+    ) -> OperationResult:
+        return self.runner.run(self.implementation.scroll_into_view(timeout=timeout))
+
     def drag_to(
         self,
         target: Locator,
@@ -342,6 +445,82 @@ class LocatorRoot:
         )
 
 
+class MobileApp:
+    """Public synchronous typed-screen facade over the canonical async kernel."""
+
+    def __init__(self, implementation: CanonicalSyncMobileApp, runner: SyncRunner) -> None:
+        self.implementation = implementation
+        self.runner = runner
+
+    def wait_for(
+        self,
+        screen_type: type[MobileScreenT],
+        *,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT:
+        return self.runner.run(self.implementation.wait_for(screen_type, timeout=timeout))
+
+    def wait_for_any(
+        self,
+        target: ScreenTarget[MobileScreenT],
+        *,
+        timeout: timedelta | None = None,
+    ) -> ScreenChoice[MobileScreenT]:
+        return self.runner.run(self.implementation.wait_for_any(target, timeout=timeout))
+
+    @overload
+    def settle(
+        self,
+        screen: type[MobileScreenT],
+        *,
+        stable_for: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT: ...
+
+    @overload
+    def settle(
+        self,
+        screen: MobileScreenT,
+        *,
+        stable_for: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT: ...
+
+    def settle(
+        self,
+        screen: type[MobileScreenT] | MobileScreenT,
+        *,
+        stable_for: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT:
+        return self.runner.run(
+            self.implementation.settle(
+                screen,
+                stable_for=stable_for,
+                timeout=timeout,
+            )
+        )
+
+    def ensure(
+        self,
+        screen_type: type[MobileScreenT],
+        *,
+        recovery: BackRecovery[MobileScreenT] | None = None,
+        timeout: timedelta | None = None,
+    ) -> MobileScreenT:
+        return self.runner.run(
+            self.implementation.ensure(
+                screen_type,
+                recovery=recovery,
+                timeout=timeout,
+            )
+        )
+
+    @property
+    def cancelled_transition_receipt(self) -> ActionReceipt | None:
+        return self.implementation.cancelled_transition_receipt
+
+
 class App(LocatorRoot):
     def __init__(self, implementation: AsyncApp, runner: SyncRunner) -> None:
         super().__init__(implementation, runner)
@@ -350,6 +529,22 @@ class App(LocatorRoot):
     @property
     def package_name(self) -> str:
         return self.app_implementation.package_name
+
+    def mobile(
+        self,
+        *,
+        interruptions: tuple[type[MobileInterruption[Any]], ...] = (),
+        max_dismissals: int = 8,
+    ) -> MobileApp:
+        return MobileApp(
+            CanonicalSyncMobileApp(
+                self.app_implementation,
+                self.runner,
+                interruptions=interruptions,
+                max_dismissals=max_dismissals,
+            ),
+            self.runner,
+        )
 
     def activate(self) -> None:
         self.runner.run(self.app_implementation.activate())
@@ -478,7 +673,7 @@ class Android:
         *,
         serial: str | None = None,
         server: AppiumServer | None = None,
-        timeouts: AppiumTimeouts | None = None,
+        timeouts: Timeouts | None = None,
         capabilities: tuple[AdditionalCapability, ...] = (),
     ) -> Device:
         async_device = self.runner.run(

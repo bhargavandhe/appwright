@@ -17,6 +17,7 @@ from appwright.models.config import (
     ApplicationOptions,
     CapabilityValue,
     SessionCapabilities,
+    Timeouts,
 )
 from appwright.models.data import ActionRequest, Deadline
 from appwright.models.enums import ActionKind, CapabilityValueKind, ServerMode
@@ -46,6 +47,20 @@ def test_application_requires_package() -> None:
 def test_timeout_accepts_timedelta() -> None:
     timeout = AppiumTimeouts(action=timedelta(seconds=12))
     assert timeout.action == timedelta(seconds=12)
+
+
+def test_mobile_timeout_budgets_have_distinct_defaults() -> None:
+    timeouts = Timeouts()
+
+    assert timeouts.probe == timedelta(seconds=2)
+    assert timeouts.wait == timedelta(seconds=30)
+    assert timeouts.action == timedelta(seconds=30)
+    assert timeouts.transition == timedelta(seconds=90)
+    assert timeouts.interruption == timedelta(seconds=30)
+    assert timeouts.transport == timedelta(seconds=120)
+    assert timeouts.stability == timedelta(milliseconds=300)
+    assert timeouts.server_start == timedelta(seconds=30)
+    assert timeouts.retry.initial_delay == timedelta(milliseconds=20)
 
 
 def test_nested_capabilities_round_trip_through_typed_model() -> None:

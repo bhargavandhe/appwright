@@ -1,6 +1,7 @@
 """Appwright exception hierarchy."""
 
 from appwright.models.data import ErrorDetails
+from appwright.operations import ActionReceipt
 
 
 def render_error(details: ErrorDetails) -> str:
@@ -89,3 +90,11 @@ class TargetClosedError(AppwrightError):
 
 class UnsupportedOperationError(AppwrightError):
     pass
+
+
+class IndeterminateActionError(AppwrightError):
+    """An action may have reached the device and therefore cannot be replayed safely."""
+
+    def __init__(self, details: ErrorDetails, receipt: ActionReceipt) -> None:
+        super().__init__(details)
+        self.receipt = receipt
